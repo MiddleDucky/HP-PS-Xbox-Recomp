@@ -51,8 +51,10 @@ PLAYING
 Start the game with hpps_launcher.exe. Opening hpps.exe directly only offers
 to open the launcher.
 
-The launcher sets the aspect ratio (4:3 or 16:9), display, graphics and
-controls, then starts the game with Play. If you turn its page off, the
+The launcher sets the aspect ratio (4:3 or 16:9), display, graphics,
+controls and the language, then starts the game with Play. Language: the
+game starts in English, French, German, Spanish, Italian, Dutch or Swedish,
+the seven the disc has speech for (the game's own menu can still change it). If you turn its page off, the
 launcher starts the game straight away; hold Shift while opening it to see
 the page again.
 
@@ -184,12 +186,16 @@ Enhancements
                          picks up a bean (on by default)
 
 Debug
-  Logs
-    Write debug logs     writes hpps_run.log and xbox_kernel.log beside the
-                         game from the next start. Off by default; turn it on
-                         to report a problem, and send both files with your
-                         report. With it off, a crash still leaves
-                         hpps_crash.log beside the game with the crash report.
+  Logs                   every start from the launcher writes a log to
+                         logs\runs (hpps_run_<date_time>.log, with the
+                         kernel's xbox_kernel_<date_time>.log beside it); the
+                         newest 10 runs are kept. Send both with a report.
+    Open logs folder     opens logs\runs
+    Mark this moment in the log
+                         writes a numbered [MARK] line with where Harry is
+                         and what he is doing: press it right after something
+                         goes wrong and give the number with your report
+    Extra debug traces   more detail in the log; from the next start
 
 
 TROUBLESHOOTING
@@ -206,9 +212,9 @@ The launcher says game files are damaged or missing
     hpps.exe.
 
 The game will not start / closes at once
-    Update your graphics driver (DirectX 12 is required). Then turn on
-    F10 > Debug > Write debug logs (or set debug_logs = true in hpps.toml),
-    start again and keep hpps_run.log.
+    Update your graphics driver (DirectX 12 is required). If it still fails,
+    send the newest hpps_run_<date_time>.log and xbox_kernel_<date_time>.log
+    from logs\runs beside the game.
 
 A short pause the first time you enter an area
     Shaders are being prepared for your graphics card; the loading picture

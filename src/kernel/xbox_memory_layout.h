@@ -467,9 +467,8 @@ void xbox_HeapFree(uint32_t xbox_va);
 uint32_t xbox_HeapBlockSize(uint32_t xbox_va);
 
 /**
- * True when RECOMP_HEAP_RECLAIM is set: freed heap blocks are split rather than
+ * True unless RECOMP_HEAP_RECLAIM=0: freed heap blocks are split rather than
  * handed over whole, and NtFreeVirtualMemory returns heap memory to the heap.
- * Off by default; it changes which address later allocations get.
  */
 int xbox_HeapReclaimEnabled(void);
 

@@ -637,10 +637,77 @@ static void autoplay(HppsTrainerShm *t, uint32_t level, uint32_t obj)
 }
 
 extern void sub_00095370_gen(void);
+/* debug (RECOMP_SPELL_PROBE=1): the spell buttons (0x329DD5..7) and the bytes round them as they change, to tell
+ * which slot is which button and where the learnt spells are kept (2026-11-01) */
+static void spell_probe(void)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("RECOMP_SPELL_PROBE") && *getenv("RECOMP_SPELL_PROBE") != '0';
+    if (!on) return;
+    static uint8_t last[64];
+    static int first = 1;
+    uint8_t now[64];
+    for (int i = 0; i < 64; i++) now[i] = MEM8(0x329DC0 + i);
+    if (!first && !memcmp(now, last, sizeof now)) return;
+    first = 0;
+    char line[64 * 3 + 1];
+    for (int i = 0; i < 64; i++) sprintf(line + 3 * i, "%02X ", now[i]);
+    fprintf(stderr, "[SPELLS] buttons %u %u %u | 329DC0: %s\n", now[0x15], now[0x16], now[0x17], line);
+    memcpy(last, now, sizeof now);
+}
+
+/* [HARRY] (always on, a line only when something changes, as CoS's [HDIFF]): Harry's state ([harry+0xDC]+0x2564, the
+ * one [CRAB] reads) at each change, with his position and the pad; and "stuck" when the left stick has been held
+ * for over a second while he moved less than a unit, once a spell and again when he moves. For the ledge where
+ * pushing through the wall's knock-off animation left Harry locked (2026-11-02): what state he is held in */
+static void harry_trace(uint32_t ent)
+{
+    static uint32_t last_ent, last_state = 0xFFFFFFFFu, lines;
+    static float anchor[3];
+    static ULONGLONG held_since;
+    static int stuck_told;
+    uint32_t ctrl = MEM32(ent + 0xDC), obj = MEM32(ent + 0x28);
+    if (!ctrl || !obj || lines > 20000) return;
+    uint32_t cur = current_matrix(obj), state = MEM32(ctrl + 0x2564);
+    float p[3] = {MEMF(cur + 48), MEMF(cur + 52), MEMF(cur + 56)};
+    XBOX_GAMEPAD g = hpps_last_pad;
+    ULONGLONG now = GetTickCount64();
+    if (ent != last_ent) last_ent = ent, last_state = 0xFFFFFFFFu, held_since = 0;
+    if (state != last_state) {
+        fprintf(stderr, "[HARRY] %9.2f s state 0x%X -> 0x%X at %.1f %.1f %.1f | pad %04X stick %d %d | level %u\n",
+                now / 1000.0, last_state, state, p[0], p[1], p[2], g.wButtons, g.sThumbLX, g.sThumbLY,
+                MEM32(kLevelNow));
+        last_state = state;
+        lines++;
+    }
+    int pushing = g.sThumbLX * g.sThumbLX + g.sThumbLY * g.sThumbLY > 12000 * 12000;
+    float dx = p[0] - anchor[0], dy = p[1] - anchor[1], dz = p[2] - anchor[2];
+    int moved = dx * dx + dy * dy + dz * dz > 1.0f;
+    if (!pushing || moved || !held_since) {
+        if (stuck_told && (moved || !pushing)) {
+            fprintf(stderr, "[HARRY] %9.2f s free again (%s), state 0x%X at %.1f %.1f %.1f\n", now / 1000.0,
+                    moved ? "moved" : "stick let go", state, p[0], p[1], p[2]);
+            lines++;
+        }
+        stuck_told = 0;
+        anchor[0] = p[0], anchor[1] = p[1], anchor[2] = p[2];
+        held_since = pushing ? now : 0;
+        return;
+    }
+    if (!stuck_told && now - held_since > 1000) {
+        stuck_told = 1;
+        lines++;
+        fprintf(stderr, "[HARRY] %9.2f s stuck: stick %d %d held %.1f s, moved under a unit, state 0x%X at %.1f %.1f "
+                "%.1f | pad %04X | controller %08X\n", now / 1000.0, g.sThumbLX, g.sThumbLY, (now - held_since) / 1000.0,
+                state, p[0], p[1], p[2], g.wButtons, ctrl);
+    }
+}
+
 void sub_00095370(void)
 {
     HppsTrainerShm *t = shm();
     uint32_t ent = ARG(0);
+    if (ent && ent == MEM32(kPlayer)) spell_probe(), harry_trace(ent);
     if (!t || ent != MEM32(kPlayer) || !ent) {
         sub_00095370_gen();
         return;
@@ -809,10 +876,8 @@ void sub_00095370(void)
     t->frame++;
 }
 
-static void write_state(const char *path, HppsTrainerShm *t)
+static void write_state_to(FILE *f, HppsTrainerShm *t)
 {
-    FILE *f = fopen(path, "w");
-    if (!f) return;
     SYSTEMTIME st;
     GetLocalTime(&st);
     fprintf(f, "time %04u-%02u-%02u %02u:%02u:%02u, %.1f s since boot\n", st.wYear, st.wMonth, st.wDay, st.wHour,
@@ -825,6 +890,7 @@ static void write_state(const char *path, HppsTrainerShm *t)
         uint32_t obj = MEM32(pl + 0x28);
         fprintf(f, " name '%.15s' object %08X controller %08X", (const char *)XBOX_PTR(MEM32(pl + 0x0C)), obj,
                 MEM32(pl + 0xDC));
+        if (MEM32(pl + 0xDC)) fprintf(f, " state 0x%X", MEM32(MEM32(pl + 0xDC) + 0x2564));
         if (obj) {
             uint32_t cur = current_matrix(obj);
             fprintf(f, " position %.2f %.2f %.2f", MEMF(cur + 48), MEMF(cur + 52), MEMF(cur + 56));
@@ -841,7 +907,26 @@ static void write_state(const char *path, HppsTrainerShm *t)
     fprintf(f, " sticks %d %d %d %d\n", g.sThumbLX, g.sThumbLY, g.sThumbRX, g.sThumbRY);
     fprintf(f, "trainer: noclip %u god %u insta-kill %u undo kept %d, level now %u (%d watched)\n", t->noclip, t->god,
             t->instakill, g_undo.kept, MEM32(kLevelNow), g_nwatch);
+}
+
+static void write_state(const char *path, HppsTrainerShm *t)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    write_state_to(f, t);
     fclose(f);
+}
+
+/* F10 > Debug > Mark this moment: the trainer report's game state (Harry's entity, position and controller, the
+ * level, health, inventory, the pad) into the run log under the mark, so "stuck here" comes with where and how */
+void hpps_MarkState(int mark)
+{
+    HppsTrainerShm *t = shm();
+    fprintf(stderr, "[MARK] %d state:\n", mark);
+    if (t) write_state_to(stderr, t);
+    else fprintf(stderr, "  (no trainer state: shared memory unavailable)\n");
+    fprintf(stderr, "[MARK] %d state end\n", mark);
+    fflush(stderr);
 }
 
 static DWORD WINAPI report_thread(LPVOID arg)

@@ -264,9 +264,15 @@ static CRITICAL_SECTION* xbox_cs_shadow(PRTL_CRITICAL_SECTION guest)
     uintptr_t key = (uintptr_t)guest;
     CRITICAL_SECTION* found = NULL;
     size_t home, i;
+    /* this thread's last lock: a title takes one lock over and over (HP:CoS's 0x80011130, ~1600 times an
+     * inventory load), and slots are never freed, so the pair stays right */
+    static RECOMP_TLS uintptr_t t_last_key;
+    static RECOMP_TLS CRITICAL_SECTION* t_last_cs;
 
     if (!key)
         return NULL;
+    if (key == t_last_key)
+        return t_last_cs;
     home = (size_t)((key >> 4) % XBOX_CS_TABLE_SIZE);
 
     /* Shared pass first: after start-up almost every call finds an existing
@@ -279,8 +285,10 @@ static CRITICAL_SECTION* xbox_cs_shadow(PRTL_CRITICAL_SECTION guest)
         if (slot->key == 0) break;
     }
     ReleaseSRWLockShared(&g_cs_table_lock);
-    if (found)
+    if (found) {
+        t_last_key = key, t_last_cs = found;
         return found;
+    }
 
     AcquireSRWLockExclusive(&g_cs_table_lock);
     for (i = 0; i < XBOX_CS_TABLE_SIZE; i++) {
@@ -296,6 +304,8 @@ static CRITICAL_SECTION* xbox_cs_shadow(PRTL_CRITICAL_SECTION guest)
         }
     }
     ReleaseSRWLockExclusive(&g_cs_table_lock);
+    if (found)
+        t_last_key = key, t_last_cs = found;
 
     if (!found && !g_cs_table_full) {
         g_cs_table_full = 1;
@@ -470,11 +480,14 @@ static void xbox_cs_clear_owner(CRITICAL_SECTION* cs)
     }
 }
 
+void xbox_GuestPollYield(void);  /* kernel_bridge.c: the main thread polling a worker yields to it */
+
 VOID __stdcall xbox_RtlEnterCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
 {
     CRITICAL_SECTION* cs = xbox_cs_shadow(CriticalSection);
     if (!cs)
         return;
+    xbox_GuestPollYield();
     InterlockedIncrement(&g_cs_enters);
     crt_lock_trace("take", CriticalSection);
     if (TryEnterCriticalSection(cs)) {

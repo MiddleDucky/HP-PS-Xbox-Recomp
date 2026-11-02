@@ -1049,6 +1049,7 @@ NTSTATUS __stdcall xbox_ExSaveNonVolatileSetting(ULONG ValueIndex, ULONG Type, P
 #define XC_MISC                   0x11
 #define XC_DVD_REGION             0x12
 #define XC_MAX_OS                 0xFF
+#define XC_FACTORY_AV_REGION      0x103
 #define XC_FACTORY_GAME_REGION    0x104
 
 /* Older spellings kept so existing call sites still build. */

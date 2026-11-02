@@ -674,6 +674,9 @@ static void bridge_PsCreateSystemThreadEx(void)
 static void bridge_note_async_handle(uint32_t token);
 static void bridge_forget_async_handle(uint32_t token);
 static int  bridge_handle_is_async(uint32_t token);
+/* The file each open handle names, for [SLOWCALL]; defined with them. */
+static void bridge_note_file_name(uint32_t token);
+static void bridge_forget_file_name(uint32_t token);
 
 /* Handle-table helpers; defined further below. Xbox memory slots are 32-bit
  * but native HANDLEs are 64-bit pointers, so handles are kept in a table and
@@ -691,6 +694,7 @@ static void bridge_NtClose(void)
     }
 
     bridge_forget_async_handle(raw_handle);
+    bridge_forget_file_name(raw_handle);
 
     /* Close real handles but skip fake/synthetic ones */
     if (raw_handle && raw_handle != 0xDEAD0001u && raw_handle != 0xBEEF0010u) {
@@ -1131,11 +1135,54 @@ static void bridge_NtQueryVirtualMemory(void)
     g_eax = 0;                                          /* STATUS_SUCCESS */
 }
 
+/* RECOMP_FREE_TRACE: who is freeing, and the state of the heap behind it.
+ *
+ * A title's RtlHeap decommits a free block only once its free total passes
+ * DeCommitTotalFreeThreshold, so a decommit the console never makes says the
+ * heap's bookkeeping has drifted from the console's. The heap is found by
+ * looking up the caller's frame for a pointer whose +0x10 is the heap
+ * signature 0xEEFFEEFF. Logs the first 16 calls. */
+static void free_trace(uint32_t base_ptr, uint32_t size_ptr, uint32_t free_type)
+{
+    static int on = -1;
+    static int logged;
+    uint32_t heap = 0;
+    int i;
+
+    if (on < 0)
+        on = getenv("RECOMP_FREE_TRACE") != NULL;
+    if (!on || logged >= 16)
+        return;
+    logged++;
+
+    for (i = 3; i < 64 && !heap; i++) {
+        uint32_t p = BRIDGE_MEM32(g_esp + i * 4);
+        if (p >= 0x10000 && p < g_xbox_total_ram - 0x80 &&
+            BRIDGE_MEM32(p + 0x10) == 0xEEFFEEFFu)
+            heap = p;
+    }
+    fprintf(stderr, "  [FREE] ret=0x%08X base=0x%08X size=0x%X type=0x%X heap=0x%08X\n",
+            BRIDGE_MEM32(g_esp - 4),
+            base_ptr ? BRIDGE_MEM32(base_ptr) : 0,
+            size_ptr ? BRIDGE_MEM32(size_ptr) : 0, free_type, heap);
+    if (heap) {
+        for (i = 0; i < 0x80; i += 0x20)
+            fprintf(stderr, "  [FREE]   +%02X %08X %08X %08X %08X %08X %08X %08X %08X\n", i,
+                    BRIDGE_MEM32(heap + i), BRIDGE_MEM32(heap + i + 4),
+                    BRIDGE_MEM32(heap + i + 8), BRIDGE_MEM32(heap + i + 12),
+                    BRIDGE_MEM32(heap + i + 16), BRIDGE_MEM32(heap + i + 20),
+                    BRIDGE_MEM32(heap + i + 24), BRIDGE_MEM32(heap + i + 28));
+    }
+    fflush(stderr);
+}
+
 static void bridge_NtFreeVirtualMemory(void)
 {
     uint32_t base_ptr = STACK_ARG(0);
     uint32_t size_ptr = STACK_ARG(1);
     uint32_t free_type = STACK_ARG(2);
+
+    free_trace(base_ptr, size_ptr, free_type);
 
     if (base_ptr && size_ptr) {
         uint32_t vm_base = BRIDGE_MEM32(base_ptr);
@@ -2578,14 +2625,82 @@ static void bridge_KeInitializeTimerEx(void)
  */
 #define XBOX_MAX_TIMERS 32
 typedef struct {
-    uint32_t timer_va;      /* the guest KTIMER, 0 for a free slot */
-    uint32_t dpc_va;
+    uint32_t  timer_va;     /* the guest KTIMER, 0 for a slot never used */
+    uint32_t  dpc_va;
     long long due_ms;       /* host tick when it fires */
     long      period_ms;    /* 0 for one-shot */
+    int       armed;        /* in the table and due to fire */
+    /* [TIMER] log */
+    uint32_t  caller;       /* guest code that set it last */
+    uint32_t  sets, fires;  /* in the current 10 s window */
+    uint32_t  late_max_ms;  /* fired this long after its due time, at worst */
+    uint32_t  total_sets;
+    long long first_set_ms, last_set_ms, last_fire_ms;
+    int       stall_told;   /* the watchdog line was written for this lull */
 } XboxTimer;
 static XboxTimer g_timers[XBOX_MAX_TIMERS];
 static CRITICAL_SECTION g_timer_lock;
 static int g_timer_started;
+
+/* Firing and setting are ordered by g_timer_lock, signal included.
+ *
+ * A timer is signalled (SetEvent + SignalState) inside the lock at the moment
+ * it fires, and KeSetTimer resets it inside the same lock, so between the two
+ * there is no window left: a firing either happened before the set (and the
+ * set clears it, as the real KeSetTimer does) or after it (and stands).
+ *
+ * 2026-10-30: the reset used to come after the lock was let go. The XDK's
+ * timeSetEvent thread re-arms a one-shot timer with due 0 when its callback ran
+ * late; the timer thread fired it in that gap, the reset then wiped the signal
+ * of a timer already gone from the table, and the waiter slept for good. In
+ * CoS that stopped the title's 10 ms task clock now and then, and the level
+ * music with it. Signalling before the DPC runs is also the real kernel's
+ * order (a timer's waiters are satisfied at expiry, its DPC queued after).
+ *
+ * [TIMER] lines: each timer the first time it is set (who set it, due, period,
+ * DPC), every 10 s the timers that were set or fired (counts, worst lateness),
+ * and a watchdog: a timer that was being set again and again and has gone
+ * quiet for 2 s after firing - whoever waits on it may be stuck. */
+static void timer_log_window(long long now)
+{
+    static long long last;
+    int i, any = 0;
+
+    if (!last) last = now;
+    if (now - last < 10000)
+        return;
+    for (i = 0; i < XBOX_MAX_TIMERS; i++) {
+        XboxTimer *t = &g_timers[i];
+        if (!t->timer_va || (!t->sets && !t->fires))
+            continue;
+        if (!any++)
+            fprintf(stderr, "[TIMER] %lld ms last %llds:\n", now, (now - last) / 1000);
+        fprintf(stderr, "[TIMER]   %08X set by %08X: set %u, fired %u, latest %u ms late, period %ld ms, dpc %08X, %s\n",
+                t->timer_va, t->caller, t->sets, t->fires, t->late_max_ms, t->period_ms, t->dpc_va,
+                t->armed ? "armed" : "idle");
+        t->sets = t->fires = t->late_max_ms = 0;
+    }
+    last = now;
+}
+
+static void timer_watchdog(long long now)
+{
+    int i;
+
+    for (i = 0; i < XBOX_MAX_TIMERS; i++) {
+        XboxTimer *t = &g_timers[i];
+        long long gap;
+        if (!t->timer_va || t->armed || t->stall_told || t->total_sets < 20 || !t->last_fire_ms)
+            continue;
+        gap = (t->last_set_ms - t->first_set_ms) / (long long)(t->total_sets - 1);  /* its usual interval */
+        if (gap > 500 || now - t->last_fire_ms < 2000)
+            continue;
+        t->stall_told = 1;
+        fprintf(stderr, "[TIMER] %lld ms: timer %08X (set by %08X, every ~%lld ms, %u times) fired %lld ms ago and "
+                "has not been set again - a thread waiting on it may be stuck\n", now, t->timer_va, t->caller, gap,
+                t->total_sets, now - t->last_fire_ms);
+    }
+}
 
 static DWORD WINAPI kernel_timer_thread(LPVOID unused)
 {
@@ -2631,35 +2746,50 @@ static DWORD WINAPI kernel_timer_thread(LPVOID unused)
         now = (long long)GetTickCount64();
 
         for (i = 0; i < XBOX_MAX_TIMERS; i++) {
-            uint32_t dpc, fired_va;
+            XboxTimer *t = &g_timers[i];
+            uint32_t dpc, va;
+            HANDLE ev;
 
             EnterCriticalSection(&g_timer_lock);
-            if (!g_timers[i].timer_va || now < g_timers[i].due_ms) {
+            va = t->armed && now >= t->due_ms ? t->timer_va : 0;
+            LeaveCriticalSection(&g_timer_lock);
+            if (!va)
+                continue;
+            /* The event looked up afresh (outside the lock: the shadow table
+             * has its own), then the row checked again under the lock: it may
+             * have been set or cancelled meanwhile. */
+            ev = ke_shadow_lookup(va);
+            EnterCriticalSection(&g_timer_lock);
+            if (t->timer_va != va || !t->armed || now < t->due_ms) {
                 LeaveCriticalSection(&g_timer_lock);
                 continue;
             }
-            fired_va = g_timers[i].timer_va;
-            dpc = g_timers[i].dpc_va;
-            if (g_timers[i].period_ms > 0)
-                g_timers[i].due_ms = now + g_timers[i].period_ms;
+            dpc = t->dpc_va;
+            if ((uint32_t)(now - t->due_ms) > t->late_max_ms)
+                t->late_max_ms = (uint32_t)(now - t->due_ms);
+            if (t->period_ms > 0)
+                t->due_ms = now + t->period_ms;
             else
-                g_timers[i].timer_va = 0;      /* one-shot, done */
+                t->armed = 0;                  /* one-shot, done */
+            t->fires++;
+            t->last_fire_ms = now;
+            /* Signalled inside the lock: a KeSetTimer on another thread resets
+             * it either before this (and it stands) or after (as it should). */
+            if (ev) {
+                SetEvent(ev);
+                BRIDGE_MEM32(va + 4) = 1;   /* SignalState */
+            }
             LeaveCriticalSection(&g_timer_lock);
 
             /* Outside the lock: the routine can set or cancel timers. */
             if (dpc)
                 kernel_run_dpc(dpc, 0, 0);
-
-            /* Wake anyone parked on the timer's shadow event; a timer with no
-             * DPC is just a kernel sleep. */
-            {
-                HANDLE ev = ke_shadow_lookup(fired_va);
-                if (ev) {
-                    SetEvent(ev);
-                    BRIDGE_MEM32(fired_va + 4) = 1;   /* SignalState */
-                }
-            }
         }
+
+        EnterCriticalSection(&g_timer_lock);
+        timer_watchdog(now);
+        timer_log_window(now);
+        LeaveCriticalSection(&g_timer_lock);
     }
 }
 
@@ -2668,7 +2798,9 @@ static void kernel_set_timer(uint32_t timer_va, long long due_100ns,
                              long period_ms, uint32_t dpc_va)
 {
     long long delay_ms = (due_100ns < 0) ? (-due_100ns) / 10000 : 0;
-    int i, free_slot = -1;
+    long long now;
+    HANDLE ev = ke_shadow_lookup(timer_va);   /* outside the timer lock: it takes its own */
+    int i, slot = -1, unused = -1, idle = -1;
     uint32_t was_set = 0;
 
     if (!g_timer_started) {
@@ -2678,24 +2810,47 @@ static void kernel_set_timer(uint32_t timer_va, long long due_100ns,
     }
 
     EnterCriticalSection(&g_timer_lock);
+    now = (long long)GetTickCount64();
     for (i = 0; i < XBOX_MAX_TIMERS; i++) {
-        if (g_timers[i].timer_va == timer_va) { free_slot = i; was_set = 1; break; }
-        if (!g_timers[i].timer_va && free_slot < 0) free_slot = i;
+        if (g_timers[i].timer_va == timer_va) { slot = i; break; }
+        if (!g_timers[i].timer_va && unused < 0) unused = i;
+        if (g_timers[i].timer_va && !g_timers[i].armed && idle < 0) idle = i;
     }
-    if (free_slot >= 0) {
-        g_timers[free_slot].timer_va  = timer_va;
-        g_timers[free_slot].dpc_va    = dpc_va;
-        g_timers[free_slot].due_ms    = (long long)GetTickCount64() + delay_ms;
-        g_timers[free_slot].period_ms = period_ms;
+    if (slot < 0) {   /* a timer not seen before: a never-used slot, else an idle one */
+        slot = unused >= 0 ? unused : idle;
+        if (slot >= 0) {
+            memset(&g_timers[slot], 0, sizeof g_timers[slot]);
+            g_timers[slot].timer_va = timer_va;
+            g_timers[slot].first_set_ms = now;
+            fprintf(stderr, "[TIMER] %lld ms: new timer %08X set by %08X: due in %lld ms, period %ld ms, dpc %08X%s\n",
+                    now, timer_va, g_xbox_kernel_caller, delay_ms, period_ms, dpc_va,
+                    ev ? "" : " (no event: KeInitializeTimerEx not seen)");
+        } else {
+            static int told;
+            if (!told++)
+                fprintf(stderr, "[TIMER] %lld ms: the table is full (%d armed timers); timer %08X set by %08X "
+                        "will never fire\n", now, XBOX_MAX_TIMERS, timer_va, g_xbox_kernel_caller);
+        }
     }
-    LeaveCriticalSection(&g_timer_lock);
-
-    /* A freshly set timer starts unsignaled, like the real KeSetTimer. */
-    {
-        HANDLE ev = ke_shadow_lookup(timer_va);
+    if (slot >= 0) {
+        XboxTimer *t = &g_timers[slot];
+        was_set = (uint32_t)t->armed;
+        /* A set timer starts unsignaled, like the real KeSetTimer: inside the
+         * lock, so no firing can fall between this and the arming below. */
         if (ev)
             ResetEvent(ev);
+        BRIDGE_MEM32(timer_va + 4) = 0;   /* SignalState */
+        t->dpc_va    = dpc_va;
+        t->due_ms    = now + delay_ms;
+        t->period_ms = period_ms;
+        t->armed     = 1;
+        t->caller    = g_xbox_kernel_caller;
+        t->sets++;
+        t->total_sets++;
+        t->last_set_ms = now;
+        t->stall_told = 0;
     }
+    LeaveCriticalSection(&g_timer_lock);
     g_eax = was_set;
 }
 
@@ -2714,7 +2869,8 @@ static void bridge_KeSetTimerEx(void)
     kernel_set_timer(STACK_ARG(0), due, (long)STACK_ARG(3), STACK_ARG(4));
 }
 
-/* Drop a timer so it stops firing. Returns whether it was armed. */
+/* Drop a timer so it stops firing. Returns whether it was armed. The slot
+ * keeps the timer (and its [TIMER] counts) until another timer needs it. */
 int xbox_kernel_cancel_timer(uint32_t timer_va)
 {
     int i, was_set = 0;
@@ -2723,8 +2879,9 @@ int xbox_kernel_cancel_timer(uint32_t timer_va)
         return 0;
     EnterCriticalSection(&g_timer_lock);
     for (i = 0; i < XBOX_MAX_TIMERS; i++)
-        if (g_timers[i].timer_va == timer_va) {
-            g_timers[i].timer_va = 0;
+        if (g_timers[i].timer_va == timer_va && g_timers[i].armed) {
+            g_timers[i].armed = 0;
+            g_timers[i].stall_told = 1;   /* cancelled on purpose: not a stall */
             was_set = 1;
         }
     LeaveCriticalSection(&g_timer_lock);
@@ -2928,6 +3085,113 @@ static HANDLE bridge_resolve_handle(uint32_t token)
     return (HANDLE)(uintptr_t)token;
 }
 
+/*
+ * Thread objects for ObReferenceObjectByHandle.
+ *
+ * XAPI SetThreadPriority references the thread handle and passes the object to
+ * KeSetBasePriorityThread. The bridge used to return object 0, so no priority
+ * ever reached Windows: CoS's TIME_CRITICAL streaming thread ran at normal
+ * priority behind the game loop on the shared guest core and refilled its
+ * 50 ms music loops late (crackle in gameplay only). Each host thread gets a
+ * small zeroed guest block (safe to dereference) mapped to its host HANDLE.
+ */
+#define BRIDGE_THREAD_OBJ_MAX 64
+static struct { DWORD tid; uint32_t obj; HANDLE h; } s_thread_objs[BRIDGE_THREAD_OBJ_MAX];
+static int s_thread_obj_count;
+
+static uint32_t bridge_thread_object(uint32_t token)
+{
+    HANDLE h = NULL;
+    DWORD tid;
+    int i;
+    if (token == 0xFFFFFFFEu) {           /* NtCurrentThread() */
+        if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
+                             GetCurrentProcess(), &h, 0, FALSE,
+                             DUPLICATE_SAME_ACCESS))
+            return 0;
+    } else if ((token & 0xFF000000u) == BRIDGE_HANDLE_TAG) {
+        uint32_t k = token & BRIDGE_HANDLE_MASK;
+        if (k == 0 || k >= BRIDGE_HANDLE_MAX) return 0;
+        h = s_handle_table[k];
+    } else {
+        return 0;
+    }
+    tid = h ? GetThreadId(h) : 0;
+    if (!tid) {
+        if (token == 0xFFFFFFFEu && h) CloseHandle(h);
+        return 0;                          /* not a thread handle */
+    }
+    for (i = 0; i < s_thread_obj_count; i++)
+        if (s_thread_objs[i].tid == tid) {
+            if (token == 0xFFFFFFFEu) CloseHandle(h);
+            return s_thread_objs[i].obj;
+        }
+    if (s_thread_obj_count >= BRIDGE_THREAD_OBJ_MAX) {
+        if (token == 0xFFFFFFFEu) CloseHandle(h);
+        return 0;
+    }
+    {
+        uint32_t obj = xbox_HeapAlloc(0x200, 16), o;
+        HANDLE own = NULL;
+        if (!obj) return 0;
+        for (o = 0; o < 0x200; o += 4) BRIDGE_MEM32(obj + o) = 0;
+        if (token == 0xFFFFFFFEu) own = h;  /* already our own copy */
+        else DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(), &own,
+                             0, FALSE, DUPLICATE_SAME_ACCESS);
+        s_thread_objs[s_thread_obj_count].tid = tid;
+        s_thread_objs[s_thread_obj_count].obj = obj;
+        s_thread_objs[s_thread_obj_count].h = own;
+        s_thread_obj_count++;
+        return obj;
+    }
+}
+
+static HANDLE bridge_thread_host(uint32_t obj, DWORD *tid)
+{
+    int i;
+    for (i = 0; i < s_thread_obj_count; i++)
+        if (s_thread_objs[i].obj == obj) {
+            if (tid) *tid = s_thread_objs[i].tid;
+            return s_thread_objs[i].h;
+        }
+    return NULL;
+}
+
+/* Xbox base-priority increment -> Win32 thread priority (XAPI maps
+ * THREAD_PRIORITY_TIME_CRITICAL to 16 and IDLE to -16 before the call). */
+/* A raised priority short of time-critical (+1 to +14) is run at normal while guest threads share one core
+ * (RECOMP_GUEST_CORES unset or a mask). On the console such a thread is a loader that sleeps on the DVD most of the
+ * time; here its reads finish at once and it stays on the core, and Windows -- which, unlike Wine, keeps strict
+ * priorities -- left the title's main thread waiting behind it. HP:CoS's file cache worker (0x1146C0, +1) copying
+ * into potterfilecache held the shared core for 100 to 400 ms at a time on a Windows PC (2026-10-25, [HITCH]: the time
+ * in RtlLeave/EnterCriticalSection of lock 0x80011130 it shares with the main thread). At normal the two take turns
+ * on the core, as under Wine. Not below normal: the main thread polls the worker through that lock while the
+ * inventory loads, never blocking, and a worker below it ran only on Windows' starvation boost (1.3 to 2.2 s
+ * loads). Time-critical threads (the audio streamers) keep their priority.
+ * RECOMP_GUEST_BOOST=keep: as the console */
+int xbox_GuestCoreShared(void);
+
+static int bridge_win32_priority(LONG inc)
+{
+    if (inc >= 1 && inc < 15 && xbox_GuestCoreShared()) return THREAD_PRIORITY_NORMAL;
+    if (inc >= 15) return THREAD_PRIORITY_TIME_CRITICAL;
+    if (inc <= -15) return THREAD_PRIORITY_IDLE;
+    if (inc >= 2) return THREAD_PRIORITY_HIGHEST;
+    if (inc <= -2) return THREAD_PRIORITY_LOWEST;
+    return (int)inc;   /* -1, 0, 1 match Win32 */
+}
+
+static void bridge_apply_priority(const char *fn, uint32_t obj, LONG inc)
+{
+    DWORD tid = 0;
+    HANDLE h = bridge_thread_host(obj, &tid);
+    int pri = bridge_win32_priority(inc);
+    BOOL ok = h ? SetThreadPriority(h, pri) : FALSE;
+    fprintf(stderr, "[THREAD] %s obj=%08X tid=%lu increment=%ld -> win32 %d %s\n",
+            fn, obj, (unsigned long)tid, (long)inc, pri,
+            ok ? "ok" : (h ? "FAILED" : "no host thread"));
+}
+
 static HANDLE bridge_take_handle(uint32_t token)
 {
     if ((token & 0xFF000000u) == BRIDGE_HANDLE_TAG) {
@@ -3126,6 +3390,8 @@ static void bridge_NtCreateFile(void)
      * means the caller wants asynchronous completion on this handle. */
     if (g_eax == 0 && handle_va && (options & 0x30u) == 0u)
         bridge_note_async_handle(BRIDGE_MEM32(handle_va));
+    if (g_eax == 0 && handle_va)
+        bridge_note_file_name(BRIDGE_MEM32(handle_va));
 
     /* An FMV the host can decode itself.
      *
@@ -3194,6 +3460,8 @@ static void bridge_NtOpenFile(void)
     g_eax = (uint32_t)bridge_create_file_impl(
         handle_va, access, obj_attrs, iostatus,
         0, share, 1 /* FILE_OPEN */, options);
+    if (g_eax == 0 && handle_va)
+        bridge_note_file_name(BRIDGE_MEM32(handle_va));
 }
 
 /*
@@ -3444,6 +3712,78 @@ static int bridge_handle_is_async(uint32_t token)
     return 0;
 }
 
+/* Which file each open handle is, by the end of its host path.
+ *
+ * A slow read was a line saying "NtReadFile took 180 ms" on handle 0x3A4, and
+ * the [PATH] line that opened 0x3A4 could be thousands of lines up, or before
+ * the log was even rotated. Naming the file on the slow line itself is what
+ * makes it read as "the music file" rather than as a handle to go hunting for.
+ * Same flat-array reasoning as the async handles above. */
+#define BRIDGE_FILE_NAMES 128
+static struct { uint32_t token; char name[72]; } g_file_names[BRIDGE_FILE_NAMES];
+static CRITICAL_SECTION g_file_names_lock;
+static LONG g_file_names_init;
+
+static void bridge_file_names_lock(void)
+{
+    if (InterlockedCompareExchange(&g_file_names_init, 1, 0) == 0) {
+        InitializeCriticalSection(&g_file_names_lock);
+        InterlockedExchange(&g_file_names_init, 2);
+    }
+    while (g_file_names_init != 2)
+        Sleep(0);
+    EnterCriticalSection(&g_file_names_lock);
+}
+
+static void bridge_note_file_name(uint32_t token)
+{
+    const wchar_t *w = xbox_LastHostPath();
+    size_t len = wcslen(w), from = len > 70 ? len - 70 : 0, i;
+    int slot = -1, k;
+    if (!token)
+        return;
+    bridge_file_names_lock();
+    for (k = 0; k < BRIDGE_FILE_NAMES; k++) {
+        if (g_file_names[k].token == token) { slot = k; break; }
+        if (slot < 0 && !g_file_names[k].token) slot = k;
+    }
+    if (slot >= 0) {
+        g_file_names[slot].token = token;
+        for (i = 0; from + i < len && i < sizeof g_file_names[slot].name - 1; i++)
+            g_file_names[slot].name[i] = (char)(w[from + i] < 128 ? w[from + i] : '?');
+        g_file_names[slot].name[i] = 0;
+    }
+    LeaveCriticalSection(&g_file_names_lock);
+}
+
+static void bridge_forget_file_name(uint32_t token)
+{
+    int k;
+    if (!token)
+        return;
+    bridge_file_names_lock();
+    for (k = 0; k < BRIDGE_FILE_NAMES; k++)
+        if (g_file_names[k].token == token) { g_file_names[k].token = 0; break; }
+    LeaveCriticalSection(&g_file_names_lock);
+}
+
+/* Copies the name out: the slot can be reused by another thread's open. */
+static int bridge_file_name(uint32_t token, char *out, size_t size)
+{
+    int k, found = 0;
+    if (!token || !size)
+        return 0;
+    bridge_file_names_lock();
+    for (k = 0; k < BRIDGE_FILE_NAMES; k++)
+        if (g_file_names[k].token == token) {
+            snprintf(out, size, "%s", g_file_names[k].name);
+            found = 1;
+            break;
+        }
+    LeaveCriticalSection(&g_file_names_lock);
+    return found;
+}
+
 /* Off unless RECOMP_ASYNC_IO is set, so the two behaviours stay comparable
  * rather than one being swapped in blind. */
 static int bridge_async_io_enabled(void)
@@ -3476,6 +3816,13 @@ static void bridge_NtReadFile(void)
         off.LowPart  = BRIDGE_MEM32(offset_va);
         off.HighPart = (LONG)BRIDGE_MEM32(offset_va + 4);
         poff = &off;
+    }
+    {
+        /* RECOMP_READ_DELAY_MS=n: streaming-sized reads take about as long as the console's DVD would, to tell
+         * whether a title's streaming relies on reads not being instant */
+        static int delay = -1;
+        if (delay < 0) { const char *e = getenv("RECOMP_READ_DELAY_MS"); delay = e ? atoi(e) : 0; }
+        if (delay > 0 && length >= 65536) Sleep((DWORD)delay);  /* streaming-sized reads only */
     }
     g_eax = (uint32_t)xbox_NtReadFile(handle, NULL, NULL, NULL, &ios,
                 XBOX_TO_NATIVE(buffer_va), length, poff);
@@ -4021,7 +4368,12 @@ static void bridge_ObReferenceObjectByHandle(void)
     uint32_t handle = STACK_ARG(0);
     uint32_t obj_type = STACK_ARG(1);
     uint32_t object_ptr = STACK_ARG(2);
-    if (object_ptr) BRIDGE_MEM32(object_ptr) = 0;
+    (void)obj_type;
+    /* Thread handles get a stand-in KTHREAD so XAPI SetThreadPriority's
+     * KeSetBasePriorityThread reaches the right host thread. Everything else
+     * keeps the old answer (object 0). */
+    uint32_t obj = bridge_thread_object(handle);
+    if (object_ptr) BRIDGE_MEM32(object_ptr) = obj;
     g_eax = 0;  /* STATUS_SUCCESS */
 }
 
@@ -4235,8 +4587,14 @@ static void bridge_KeQueryBasePriorityThread(void)
 
 static void bridge_KeSetBasePriorityThread(void)
 {
+    uint32_t obj = STACK_ARG(0);
+    if (bridge_thread_host(obj, NULL)) {
+        bridge_apply_priority("KeSetBasePriorityThread", obj, (LONG)STACK_ARG(1));
+        g_eax = 0;   /* previous increment */
+        return;
+    }
     g_eax = (uint32_t)xbox_KeSetBasePriorityThread(
-        XBOX_TO_NATIVE(STACK_ARG(0)), (LONG)STACK_ARG(1));
+        XBOX_TO_NATIVE(obj), (LONG)STACK_ARG(1));
 }
 
 /* ── KeStallExecutionProcessor (ordinal 151, 1 arg) */
@@ -7463,9 +7821,11 @@ static void bridge_KeSetPriorityProcess(void)
 /* --- KeSetPriorityThread (ordinal 148, 2 args = 8 bytes) --- */
 static void bridge_KeSetPriorityThread(void)
 {
-    (void)STACK_ARG(0);
-    (void)STACK_ARG(1);
-    g_eax = 0;
+    /* Absolute priority: Xbox normal is 8, realtime starts at 16. */
+    uint32_t obj = STACK_ARG(0);
+    if (bridge_thread_host(obj, NULL))
+        bridge_apply_priority("KeSetPriorityThread", obj, (LONG)STACK_ARG(1) - 8);
+    g_eax = 8;
 }
 
 /* --- KeTestAlertThread (ordinal 155, 1 arg = 4 bytes) --- */
@@ -9520,6 +9880,60 @@ void xbox_PinToGuestCore(void)
         fprintf(stderr, "  [KERNEL] guest CPU pin failed (error %lu)\n", GetLastError());
 }
 
+/* Time on the shared guest core (RECOMP_GUEST_BOOST=keep: none of this). Windows gives equal threads long turns
+ * and runs a higher one first, where Wine's Linux scheduler slices finely: a guest worker busy on the core (HP:CoS's
+ * file cache copier, whose reads finish at once where the console's DVD made it wait) held the main thread for 20 to
+ * 400 ms. So, as under Wine, every guest thread short of time-critical runs at normal (bridge_win32_priority: the
+ * title's +1 to +14), a worker that has run 2 ms on end steps aside at its next kernel call for whatever is ready on
+ * the core (xbox_GuestSliceYield: the main thread, at most ~2 ms behind it), and a main thread polling a worker
+ * through a lock yields to it (xbox_GuestPollYield). Not done (2026-10-25): the main thread above normal with the
+ * timer and USB ISR threads highest (the music stopped after a pickup in the Basilisk fight and stayed off), the
+ * workers below normal (the inventory's load took 1.3 to 2.2 s), the threads unpinned (HP:CoS's request queue lost a
+ * wake-up and the last cutscene froze) */
+int xbox_GuestCoreShared(void)
+{
+    static int shared = -1;
+    if (shared < 0) {
+        const char *e = getenv("RECOMP_GUEST_CORES"), *k = getenv("RECOMP_GUEST_BOOST");
+        shared = !(e && !strcmp(e, "all")) && !(k && !strcmp(k, "keep"));
+    }
+    return shared;
+}
+
+extern RECOMP_TLS int g_xbox_guest_main;
+
+/* a guest worker (not the main thread, not time-critical) that has run 2 ms since it last stepped aside */
+static void xbox_GuestSliceYield(void)
+{
+    static LARGE_INTEGER freq;
+    static RECOMP_TLS LARGE_INTEGER t_since;
+    static RECOMP_TLS int t_critical = -1;
+    LARGE_INTEGER now;
+    if (g_xbox_guest_main || !xbox_GuestCoreShared()) return;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    if (!t_since.QuadPart) t_since = now;
+    if (now.QuadPart - t_since.QuadPart < freq.QuadPart / 500) return;
+    if (t_critical < 0 || (now.QuadPart & 0xF) == 0)  /* the title may set it later: looked at again now and then */
+        t_critical = GetThreadPriority(GetCurrentThread()) >= THREAD_PRIORITY_HIGHEST;
+    if (!t_critical) SwitchToThread();
+    QueryPerformanceCounter(&t_since);
+}
+
+/* The main thread polling a worker through a lock (thousands of lock calls a frame, against ~70; the HP:CoS
+ * inventory's load): every 64th call past 1000 within 16 ms gives the core to whatever else is ready on it, the
+ * worker it waits for, which its higher priority would otherwise keep off */
+RECOMP_TLS int g_xbox_guest_main;
+void xbox_GuestPollYield(void)
+{
+    static ULONGLONG window;
+    static uint32_t calls;
+    if (!g_xbox_guest_main || !xbox_GuestCoreShared()) return;
+    ULONGLONG now = GetTickCount64();
+    if (now - window > 16) window = now, calls = 0;
+    if (++calls > 1000 && !(calls & 63)) SwitchToThread();
+}
+
 /* Called once on each host thread that runs a guest thread, before its first
  * guest instruction. */
 void guest_cpu_join(void)
@@ -9563,9 +9977,119 @@ static void kernel_thunk_dispatch(void)
     (void)held;
 }
 
+/* [SLOWCALL]: a kernel call that took RECOMP_SLOWCALL_MS (default 20) or more.
+ *
+ * A freeze is the title's main thread not coming back from something, and a
+ * stack sample only says where it was, not how long each call there took. Timing
+ * the one entry every kernel call goes through answers that for all of them at
+ * once: file opens and reads (from any thread, named by their file), and on the
+ * main thread every wait, sleep and lock too -- other threads park in waits as a
+ * matter of course, so theirs would only be noise. Bounded per run. 0 is off. */
+#include "kernel_ordinal_names.h"
+
+static DWORD    s_slowcall_main;    /* the first thread to call the kernel: the title's main thread */
+static double   s_slowcall_ms = -1;
+static LONG     s_slowcall_lines;
+
+/* Per frame, for a title's slow-frame breakdown ([HITCH]): the main thread's time in file calls and in every other
+ * kernel call (waits, sleeps, locks), the file calls made, and the slowest of them with its file. Read and cleared by
+ * xbox_kernel_frame_stats() once a frame (the title's Swap); only kept while RECOMP_SLOWCALL_MS times the calls. */
+static double s_frame_file_ms, s_frame_other_ms, s_frame_worst_ms;
+static uint32_t s_frame_file_calls;
+static char s_frame_worst[96];
+static double s_frame_by_ordinal[XBOX_KERNEL_THUNK_TABLE_SIZE > 400 ? XBOX_KERNEL_THUNK_TABLE_SIZE : 400];
+
+static void frame_stats_note(ULONG ordinal, double ms, const uint32_t args[4])
+{
+    /* per ordinal, once: 1 a file call, 2 not (the name test on every main-thread kernel call cost the locks) */
+    static uint8_t kind[512];
+    const char *name = NULL;
+    int file_call;
+    if (ordinal < 512 && kind[ordinal]) {
+        file_call = kind[ordinal] == 1;
+    } else {
+        name = kernel_ordinal_name(ordinal);
+        file_call = name && ((name[0] == 'N' && name[1] == 't' && strstr(name, "File")) || !strcmp(name, "NtClose"));
+        if (ordinal < 512) kind[ordinal] = file_call ? 1 : 2;
+    }
+    if (!file_call) {
+        s_frame_other_ms += ms;
+        if (ordinal < sizeof s_frame_by_ordinal / sizeof s_frame_by_ordinal[0])
+            s_frame_by_ordinal[ordinal] += ms;
+        return;
+    }
+    s_frame_file_ms += ms;
+    s_frame_file_calls++;
+    if (ms > s_frame_worst_ms) {
+        if (!name) name = kernel_ordinal_name(ordinal);
+        int opens = !strcmp(name, "NtCreateFile") || !strcmp(name, "NtOpenFile");
+        uint32_t h = opens ? (args[0] ? BRIDGE_MEM32(args[0]) : 0) : args[0];
+        char got[72];
+        s_frame_worst_ms = ms;
+        if (opens || !bridge_file_name(h, got, sizeof got))
+            snprintf(s_frame_worst, sizeof s_frame_worst, "%s", name);
+        else
+            snprintf(s_frame_worst, sizeof s_frame_worst, "%s %s", name, got);
+    }
+}
+
+void xbox_kernel_frame_stats(double *file_ms, double *other_ms, uint32_t *file_calls, double *worst_ms,
+                             char *worst, size_t worst_len, double *top_other_ms, char *top_other, size_t top_len)
+{
+    size_t top = 0;
+    for (size_t i = 1; i < sizeof s_frame_by_ordinal / sizeof s_frame_by_ordinal[0]; i++)
+        if (s_frame_by_ordinal[i] > s_frame_by_ordinal[top]) top = i;
+    *top_other_ms = s_frame_by_ordinal[top];
+    {
+        const char *name = kernel_ordinal_name((unsigned)top);
+        if (*top_other_ms <= 0) snprintf(top_other, top_len, "-");
+        else if (name) snprintf(top_other, top_len, "%s", name);
+        else snprintf(top_other, top_len, "ordinal%u", (unsigned)top);
+    }
+    memset(s_frame_by_ordinal, 0, sizeof s_frame_by_ordinal);
+    *file_ms = s_frame_file_ms, *other_ms = s_frame_other_ms, *file_calls = s_frame_file_calls;
+    *worst_ms = s_frame_worst_ms;
+    snprintf(worst, worst_len, "%s", s_frame_worst);
+    s_frame_file_ms = s_frame_other_ms = s_frame_worst_ms = 0;
+    s_frame_file_calls = 0;
+    s_frame_worst[0] = 0;
+}
+
+static void slowcall_report(ULONG ordinal, double ms, uint32_t caller, const uint32_t args[4])
+{
+    const char *name = kernel_ordinal_name(ordinal);
+    int main_thread = GetCurrentThreadId() == s_slowcall_main;
+    int file_call = name && ((name[0] == 'N' && name[1] == 't' && strstr(name, "File")) || !strcmp(name, "NtClose"));
+    char file[80] = "";
+    char num[16];
+    if (!main_thread && !file_call)
+        return;
+    if (InterlockedIncrement(&s_slowcall_lines) > 3000)
+        return;
+    if (file_call) {
+        /* NtCreateFile/NtOpenFile take the handle's address first; the others the handle */
+        int opens = !strcmp(name, "NtCreateFile") || !strcmp(name, "NtOpenFile");
+        uint32_t h = opens ? (args[0] ? BRIDGE_MEM32(args[0]) : 0) : args[0];
+        char got[72];
+        if (bridge_file_name(h, got, sizeof got))
+            snprintf(file, sizeof file, " file \"%s\"", got);
+    }
+    if (!name) {
+        snprintf(num, sizeof num, "ordinal%u", (unsigned)ordinal);
+        name = num;
+    }
+    fprintf(stderr, "[SLOWCALL] %.1f ms %s (%u) thread %lu%s from 0x%08X args %08X %08X %08X %08X%s\n",
+            ms, name, (unsigned)ordinal, (unsigned long)GetCurrentThreadId(), main_thread ? " main" : "",
+            caller, args[0], args[1], args[2], args[3], file);
+    fflush(stderr);
+}
+
+static void xbox_GuestSliceYield(void);
+
 static void kernel_thunk_dispatch_body(void)
 {
     int slot = g_kernel_dispatch_slot;
+    xbox_GuestSliceYield();
     bridge_func_t bridge;
     ULONG ordinal;
 
@@ -9669,6 +10193,21 @@ static void kernel_thunk_dispatch_body(void)
         }
     }
 
+    if (s_slowcall_ms < 0) {
+        const char *e = getenv("RECOMP_SLOWCALL_MS");
+        s_slowcall_ms = e && *e ? atof(e) : 20.0;
+    }
+    if (!s_slowcall_main)
+        InterlockedCompareExchange((LONG *)&s_slowcall_main, (LONG)GetCurrentThreadId(), 0);
+    LARGE_INTEGER _slow_t0;
+    uint32_t _slow_args[4], _slow_caller = g_xbox_kernel_caller;
+    if (s_slowcall_ms > 0) {
+        int a;
+        for (a = 0; a < 4; a++)
+            _slow_args[a] = BRIDGE_MEM32(g_esp + 4u * (uint32_t)a);
+        QueryPerformanceCounter(&_slow_t0);
+    }
+
     if (bridge) {
         bridge();
     } else {
@@ -9697,6 +10236,20 @@ static void kernel_thunk_dispatch_body(void)
             fflush(stderr);
         }
         g_eax = 0;
+    }
+
+    if (s_slowcall_ms > 0) {
+        static LARGE_INTEGER freq;
+        LARGE_INTEGER t1;
+        double ms;
+        QueryPerformanceCounter(&t1);
+        if (!freq.QuadPart)
+            QueryPerformanceFrequency(&freq);
+        ms = (double)(t1.QuadPart - _slow_t0.QuadPart) * 1000.0 / (double)freq.QuadPart;
+        if (GetCurrentThreadId() == s_slowcall_main)
+            frame_stats_note(ordinal, ms, _slow_args);
+        if (ms >= s_slowcall_ms)
+            slowcall_report(ordinal, ms, _slow_caller, _slow_args);
     }
 
     /* Clean stdcall args from the simulated stack.
@@ -9815,6 +10368,7 @@ void xbox_kernel_bridge_init(void)
     DWORD old_protect;
 
     guest_cpu_join();          /* the caller goes on to run the title's entry point */
+    g_xbox_guest_main = 1;
     fprintf(stderr, "  Kernel thunk bridge: resolving %d entries at 0x%08X\n",
             g_thunk_table_count, g_thunk_table_base);
 

@@ -21,6 +21,21 @@ static const GameFile kFiles[] = {
 #include "game_files.inc"
 };
 #define FILE_COUNT ((int)(sizeof kFiles / sizeof kFiles[0]))
+
+// other good copies of a file, beside the list's (the list is generated; these are kept by hand). The list's
+// default.xbe is the commonly shared one, patched in one byte (0x145489, guest 0x155489: XAPI's start-up check's jge
+// 7D made jmp EB, so a failed media check no longer returns to the dashboard); the disc's own, unpatched XBE is the same
+// edition and plays the same (the code runs from the recompile; the XBE gives its data and passes the edition check)
+static const GameFile kAlso[] = {
+    {"default.xbe", 3264512u, 0x3D0FF840u},  // the retail DVD's, untouched (2026-11-01)
+};
+
+static BOOL AlsoGood(int i, uint32_t crc) {
+    for (size_t k = 0; k < sizeof kAlso / sizeof kAlso[0]; k++)
+        if (!_stricmp(kAlso[k].path, kFiles[i].path) && kAlso[k].size == kFiles[i].size && kAlso[k].crc == crc)
+            return TRUE;
+    return FALSE;
+}
 #define READ_BUF   (4u << 20)
 
 // CRC-32 as zlib computes it (reflected, polynomial 0xEDB88320), eight bytes a step
@@ -63,6 +78,7 @@ DWORD gamefiles_ListId(void) {
         c = Crc(c, (const uint8_t*)&kFiles[i].size, 4);
         c = Crc(c, (const uint8_t*)&kFiles[i].crc, 4);
     }
+    for (size_t k = 0; k < sizeof kAlso / sizeof kAlso[0]; k++) c = Crc(c, (const uint8_t*)&kAlso[k].crc, 4);
     return c;
 }
 
@@ -151,7 +167,7 @@ BOOL gamefiles_Check(const WCHAR* dir, BOOL contents, GameCheck* c) {
                 Note(c, i, GAMEFILE_CONTENT);
                 InterlockedExchange64(&c->done, before + kFiles[i].size);
             }
-        } else if (crc != kFiles[i].crc) {
+        } else if (crc != kFiles[i].crc && !AlsoGood(i, crc)) {
             Note(c, i, GAMEFILE_CONTENT);
         }
     }

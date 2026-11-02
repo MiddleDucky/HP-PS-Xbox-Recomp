@@ -657,6 +657,8 @@ struct DrawTextures {
 // xboxrecomp: 16:9, what the frame being drawn holds so far (Squeeze2D), turned over at Present
 struct WideFrame {
     uint32_t scene = 0;       // perspective draws (a menu has a few: the inventory's fog)
+    bool was_live = false;    // the last frame was gameplay (LiveScene): kept while the view has little in it
+    bool wiped = false;       // an opaque fill over the whole frame hid the scene (a menu over it, the Remembrall's)
     bool backdrop = false;    // a picture across the frame went up (menus, the spellbook, movies, loading screens)
     bool cut = false;         // a cutscene: the last frame had its bars, also sliding in (they come after its HUD)
     bool bars = false;        // this frame's
@@ -3712,6 +3714,16 @@ extern "C" int hpps_LoadingScreen(void);  // hle_video.c: the loading screen's t
 extern "C" int hpps_LoadingCount(void);   // hle_video.c: loading screens so far
 extern "C" int hpps_TextIcon(uint32_t tex);
 extern "C" void hpps_TextIconDump(void);  // hle_video.c: a button icon text puts in its lines
+// xboxrecomp: gameplay's HUD layout (the sides' 2D at the sides). A gameplay frame draws its scene, 16 perspective
+// draws and more, where a menu's 3D is a dozen at most (the tutorial books' fog and book). Looking up into the sky
+// (free look) leaves only a few in view, and that frame went to the menus' layout: the life bar jumped to its 4:3
+// place (2026-11-02). So gameplay holds from the last frame while some 3D is still drawn, until a menu shows itself:
+// a picture across the frame (backdrop) or an opaque fill over the scene (wiped)
+static bool LiveScene(const WideFrame& wf) {
+    if (wf.backdrop) return false;
+    return wf.scene >= 16 || (wf.was_live && wf.scene >= 1 && !wf.wiped);
+}
+
 bool Squeeze2D(const State& s, const Assembled& a, const DrawShaders& sh, uint32_t frame_w, uint32_t frame_h,
                WideFrame& wf, DrawConstants& c) {
     if (app::BootAspect() != app::AspectMode::Wide) return false;
@@ -3797,7 +3809,7 @@ bool Squeeze2D(const State& s, const Assembled& a, const DrawShaders& sh, uint32
             const float vt = float(s.viewport.y), vb = float(s.viewport.y + s.viewport.h);
             // an opaque fill over the whole frame hides the scene drawn so far: a menu over it (the Remembrall's,
             // under its fog); the game's fades blend
-            if (r[1] <= vt + 1.0f && r[3] >= vb - 1.0f && !SimpleState(s, kMBlendEnable)) wf.scene = 0;
+            if (r[1] <= vt + 1.0f && r[3] >= vb - 1.0f && !SimpleState(s, kMBlendEnable)) wf.scene = 0, wf.wiped = true;
             if (r[3] - r[1] < fh * 0.25f && (r[1] <= vt + 1.0f || r[3] >= vb - 1.0f)) {
                 wf.bars = true;
                 wf.bars_h += r[3] - r[1];
@@ -3833,7 +3845,7 @@ bool Squeeze2D(const State& s, const Assembled& a, const DrawShaders& sh, uint32
             return false;
         }
         // over the scene (gameplay, a cutscene) a picture across the frame is a screen effect: left as drawn
-        if (wf.scene >= 16) return false;
+        if (LiveScene(wf)) return false;
         wf.backdrop = true;
         // the main menu's moving background (frontend.xmv, a 640x480 YUY2 frame) and the loading screen: the full
         // 16:9 width, their middle 360 lines (4/3 as tall about the middle) instead of the 4:3 picture between bars
@@ -3859,7 +3871,7 @@ bool Squeeze2D(const State& s, const Assembled& a, const DrawShaders& sh, uint32
     // a panel over half the frame or more each way over the scene (the pause menu's box, 60-580 x 64-440): a menu is
     // up, and its text and marks after it in the frame are squeezed about the middle with it, not kept to a side.
     // Only what lies on it: a hint's box (150-500 x 140-440) leaves the HUD around it (health, buttons) at the sides
-    if (wf.scene >= 16 && !wf.backdrop && r[2] - r[0] >= fw * 0.5f && r[3] - r[1] >= fh * 0.5f) {
+    if (LiveScene(wf) && r[2] - r[0] >= fw * 0.5f && r[3] - r[1] >= fh * 0.5f) {
         for (int i = 0; i < 4; ++i)  // a second panel widens the first
             wf.panel_r[i] = !wf.panel ? r[i] : i < 2 ? std::min(wf.panel_r[i], r[i]) : std::max(wf.panel_r[i], r[i]);
         wf.panel = true;
@@ -3870,7 +3882,7 @@ bool Squeeze2D(const State& s, const Assembled& a, const DrawShaders& sh, uint32
         wf.panel && mx >= wf.panel_r[0] && mx <= wf.panel_r[2] && my >= wf.panel_r[1] && my <= wf.panel_r[3];
     // a menu's mist (the Remembrall's fog: soft puffs drawn several times their texture's size, past the frame's
     // sides) spreads over the 16:9 width; what sits on it keeps its 4:3 shape
-    if (wf.scene < 16 && !wf.backdrop && a.vertex_count == 6 && s.textures[0]) {
+    if (!LiveScene(wf) && !wf.backdrop && a.vertex_count == 6 && s.textures[0]) {
         TextureDesc d;
         if (Describe(s.textures[0], d) && r[2] - r[0] >= 2.0f * float(d.width) && r[3] - r[1] >= 2.0f * float(d.height))
             return false;
@@ -3879,7 +3891,7 @@ bool Squeeze2D(const State& s, const Assembled& a, const DrawShaders& sh, uint32
     // left or right side keeps its distance from that side of what is shown (the overscan crop's); the rest, and the
     // marks the title places on the scene through the widened camera (the aiming circle), keep their own middle. On a
     // 4:3 screen (no scene) everything is squeezed about the frame's middle. As the line x' = sx * x + bx, y' = ...
-    const bool live = wf.scene >= 16 && !wf.backdrop;
+    const bool live = LiveScene(wf);
     const float vy = wf.vp_h > 0 ? wf.vp_y : wf.view_h > 0 ? wf.view_y : 0;
     const float vh = wf.vp_h > 0 ? wf.vp_h : wf.view_h > 0 ? wf.view_h : fh;
     float gc[4];  // gameplay's crop
@@ -4682,8 +4694,17 @@ void D3D12Backend::Present(const Surface& front, bool pillarbox) {
         // off for those frames - the shot jumped in and out
         const bool covered =
             wf_.bars && wf_.scene < 16 && wf_.bar_area > 0 && wf_.bar_cover >= wf_.bar_area * 0.9f;
-        WideFrame next{.cut = wf_.bars && !out && !covered, .bars_h_prev = wf_.bars_h, .bars_out = out,
-                       .view_y = wf_.vp_y, .view_h = wf_.vp_h};
+        const bool live = LiveScene(wf_);
+        {   // xboxrecomp: each change between gameplay's HUD layout and the menus' (LiveScene), with what decided it
+            static uint32_t told;
+            if (live != wf_.was_live && told < 400 && app::BootAspect() == app::AspectMode::Wide) {
+                told++;
+                LOGI("[WIDE] HUD layout: %s (scene draws %u, backdrop %d, opaque fill %d, bars %d)",
+                     live ? "gameplay" : "menu / 4:3", wf_.scene, int(wf_.backdrop), int(wf_.wiped), int(wf_.bars));
+            }
+        }
+        WideFrame next{.was_live = live, .cut = wf_.bars && !out && !covered, .bars_h_prev = wf_.bars_h,
+                       .bars_out = out, .view_y = wf_.vp_y, .view_h = wf_.vp_h};
         const bool cut = wf_.cut && !covered;
         float gh = float(guest_h_);
         float cr[4] = {};

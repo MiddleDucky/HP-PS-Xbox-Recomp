@@ -29,7 +29,7 @@ namespace app {
 
 namespace {
 
-enum class Kind { U32, Bool, Display, Aspect, Key, Pad, PadOpt, ColorBlind, Fps };  // PadOpt: a pad input or 'none'
+enum class Kind { U32, Bool, Display, Aspect, Key, Pad, PadOpt, ColorBlind, Fps, Language };  // PadOpt: a pad input or 'none'
 
 struct Entry {
     const char* key;  // in hpps.toml
@@ -71,7 +71,8 @@ const Entry kEntries[] = {
     {"cutscene_bars", nullptr, Kind::Bool, FIELD(cutscene_bars), 0, 0,
      "16:9: cutscenes fill the screen and keep the console's black bars over the picture (subtitles in the bottom one)"},
     {"debug_logs", "RECOMP_DEBUG_LOGS", Kind::Bool, FIELD(debug_logs), 0, 0,
-     "hpps_run.log and xbox_kernel.log beside the exe, for reporting a problem; from the next start (F10 > Debug)"},
+     "extra traces in the run log (speech and the like), from the next start (F10 > Debug). The logs themselves are "
+     "always written: logs\\runs\\hpps_run_<date_time>.log and xbox_kernel_<date_time>.log, the newest 10 runs kept"},
     {"controller", nullptr, Kind::Bool, FIELD(controller), 0, 0,
      "false: the game ignores the PC's controller (keyboard and mouse still play)"},
     {"async_shaders", "RECOMP_ASYNC_SHADERS", Kind::Bool, FIELD(async_shaders), 0, 0,
@@ -80,6 +81,8 @@ const Entry kEntries[] = {
      "the settings page before the game starts (aspect ratio, resolution, quality)"},
     {"fps_limit", "RECOMP_FPS_LIMIT", Kind::Fps, FIELD(fps_limit), 0, 0,
      "frame rate: 0 the game's own (59.94), 30 caps it at 30 fps, 'unlocked' as fast as vsync / the PC allow (experimental: the game was made for 60)"},
+    {"language", "RECOMP_LANGUAGE", Kind::Language, FIELD(language), 0, 0,
+     "the language the game starts in: 'english', 'french', 'german', 'spanish', 'italian', 'dutch' or 'swedish'; takes a restart"},
     {"speakers", "RECOMP_SPEAKERS", Kind::U32, FIELD(speakers), 2, 6,
      "2 stereo, 6 5.1 surround (the console's speaker mix, each channel to its own speaker); takes a restart"},
     {"colorblind", nullptr, Kind::ColorBlind, FIELD(colorblind), 0, 0,
@@ -158,6 +161,9 @@ const Entry kEntries[] = {
 constexpr const char* kDisplayNames[] = {"windowed", "borderless", "fullscreen"};
 constexpr const char* kAspectNames[] = {"4:3", "16:9", "stretch"};
 constexpr const char* kColorBlindNames[] = {"off", "protanopia", "deuteranopia", "tritanopia"};
+// the languages this disc carries speech for (the main menu's flag list, hle_frontend.c's sub_0002A790)
+constexpr const char* kLanguageNames[] = {"english", "french", "german", "spanish", "italian", "dutch", "swedish"};
+constexpr uint32_t kLanguages = 7;
 
 uint32_t& U(Settings& s, const Entry& e) { return *reinterpret_cast<uint32_t*>(reinterpret_cast<char*>(&s) + e.off); }
 bool& B(Settings& s, const Entry& e) { return *reinterpret_cast<bool*>(reinterpret_cast<char*>(&s) + e.off); }
@@ -203,6 +209,11 @@ bool Parse(Settings& s, const Entry& e, std::string v) {
                 if (!_stricmp(v.c_str(), kColorBlindNames[i])) return U(s, e) = i, true;
             }
             return false;
+        case Kind::Language:
+            for (uint32_t i = 0; i < kLanguages; i++) {
+                if (!_stricmp(v.c_str(), kLanguageNames[i])) return U(s, e) = i, true;
+            }
+            return false;
         case Kind::Pad:
         case Kind::PadOpt:
             for (uint32_t i = 0; i < kPadInputs; i++) {
@@ -228,6 +239,7 @@ std::string Format(Settings& s, const Entry& e) {
         case Kind::Aspect: return std::string("'") + kAspectNames[std::min(U(s, e), 2u)] + "'";
         case Kind::Fps: return U(s, e) == kFpsUnlocked ? "'unlocked'" : std::to_string(U(s, e));
         case Kind::ColorBlind: return std::string("'") + kColorBlindNames[std::min(U(s, e), 3u)] + "'";
+        case Kind::Language: return std::string("'") + kLanguageNames[std::min(U(s, e), kLanguages - 1)] + "'";
         case Kind::Pad: return std::string("'") + kPadInputNames[std::min(U(s, e), kPadInputs - 1)] + "'";
         case Kind::PadOpt:
             return U(s, e) >= kPadInputs ? std::string("'none'") : std::string("'") + kPadInputNames[U(s, e)] + "'";
@@ -308,6 +320,8 @@ void Merge(State& st) {
     }
 }
 
+void SetEnvDefault(const char* name, const std::string& v);
+
 void Init(State& st) {
     if (st.ready) return;
     st.ready = true;
@@ -327,6 +341,8 @@ void Init(State& st) {
         }
     }
     st.boot_aspect = st.cur.aspect;
+    // the game's starting language (hle_frontend.c's sub_0002A790 puts it in place of the console's language as the title starts)
+    SetEnvDefault("RECOMP_LANGUAGE", kLanguageNames[std::min(st.cur.language, kLanguages - 1)]);
     if (!had) WriteFile(st.file);
     std::error_code ec;
     st.stamp = std::filesystem::last_write_time(FilePath(), ec);
@@ -487,8 +503,9 @@ extern "C" void hpps_SettingsInit(void) {
     app::SetEnvDefault("RECOMP_WINDOW_SIZE", std::to_string(w) + "x" + std::to_string(h));
     app::SetEnvDefault("RECOMP_DISPLAY_MODE", app::kDisplayNames[uint32_t(s.display_mode)]);
     app::SetEnvDefault("RECOMP_ASPECT", app::kAspectNames[uint32_t(s.aspect)]);
-    // the kernel layer opens xbox_kernel.log (or stays silent) as it starts, after this
-    app::SetEnvDefault("RECOMP_DEBUG_LOGS", s.debug_logs ? "1" : "0");
+    // the extra traces ([SPEECH] and the like) read this; only "1" is passed: "0" would also stop the kernel's log
+    // (kernel_thunks.c), which is written every run now, as CoS's is
+    if (s.debug_logs) app::SetEnvDefault("RECOMP_DEBUG_LOGS", "1");
 }
 
 // hle_video.c: the gameplay cameras' field of view

@@ -337,6 +337,14 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
             s_key_down[w] = 0;
         return m == WM_SYSKEYUP ? DefWindowProcA(h, m, w, l) : 0;
 
+    /* F10 or a bare Alt released: DefWindowProc puts the window in menu mode, a modal loop that holds this thread --
+     * the presenter with it, so the whole title stops -- until the next key or click. Alt+Space (l = ' ') still opens
+     * the system menu. */
+    case WM_SYSCOMMAND:
+        if ((w & 0xFFF0) == SC_KEYMENU && l == 0)
+            return 0;
+        break;
+
     /* Alt-tabbing away with a key held would leave it held for ever. */
     case WM_KILLFOCUS:
         memset((void *)s_key_down, 0, sizeof s_key_down);
@@ -483,7 +491,7 @@ static void fb_display_from_env(void)
                 : XBOX_DISPLAY_WINDOWED;
 }
 
-/* Window thread. SCDA's ApplyDisplay (src/app/main.cpp): the previous mode
+/* Window thread. The renderer's original ApplyDisplay (src/app/main.cpp): the previous mode
  * change undone first, the desktop's own size is no mode change. */
 static void fb_apply_display(HWND h)
 {
@@ -829,9 +837,14 @@ static DWORD WINAPI fb_thread(LPVOID unused)
 
 void xbox_FramebufferWindowStart(void)
 {
+    /* read once: the input poll reaches here several times a frame (app::Window), and getenv takes the CRT's
+     * environment lock and walks the whole table each time */
+    static volatile LONG want = -1;
     HANDLE th;
 
-    if (!getenv("RECOMP_FB_WINDOW"))
+    if (want < 0)
+        InterlockedExchange(&want, getenv("RECOMP_FB_WINDOW") ? 1 : 0);
+    if (!want || s_fb_running)
         return;
     if (InterlockedCompareExchange(&s_fb_running, 1, 0) != 0)
         return;

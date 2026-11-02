@@ -404,14 +404,17 @@ void xbox_kernel_init(void)
     InitializeCriticalSection(&g_log_cs);
     g_log_cs_init = TRUE;
 
-    /* Try to open log file, fall back to stderr. xboxrecomp: a port's "debug logs" setting off
+    /* Try to open log file, fall back to stderr. XBOX_KERNEL_LOG names it (a
+     * launcher keeping one log per run); xbox_kernel.log in the working
+     * directory otherwise. xboxrecomp: a port's "debug logs" setting off
      * (RECOMP_DEBUG_LOGS=0) writes no file and logs nothing; unset keeps the file as before. */
     {
-        const char* dl = getenv("RECOMP_DEBUG_LOGS");
+        const char *dl = getenv("RECOMP_DEBUG_LOGS");
+        const char *log_path = getenv("XBOX_KERNEL_LOG");
         g_log_off = dl && strcmp(dl, "0") == 0;
+        if (!g_log_off)
+            g_log_file = fopen(log_path && *log_path ? log_path : "xbox_kernel.log", "w");
     }
-    if (!g_log_off)
-        g_log_file = fopen("xbox_kernel.log", "w");
 
     /* Set log level from environment variable if present */
     const char* log_env = getenv("XBOX_LOG_LEVEL");

@@ -522,11 +522,31 @@ static int fetch_attr(const VertexAttr *a, uint32_t index, float out[4])
 
 static uint32_t surface_bpp(void);
 
+/* Whether a surface of this pitch is shaped like the display mode the title
+ * set. Unknown (no AvSetDisplayMode yet) counts as no. */
+static int is_display_pitch(uint32_t pitch)
+{
+    uint32_t display_pitch = 0;
+    xbox_GetDisplayFramebuffer(&display_pitch);
+    return display_pitch && pitch == display_pitch;
+}
+
 static void note_drawn(void)
 {
-    if (!s_gpu.drawn_stale && s_gpu.drawn_offset
-        && s_gpu.clip_w * s_gpu.clip_h < s_gpu.drawn_w * s_gpu.drawn_h)
-        return;
+    /* "Biggest surface" alone is wrong the other way too: CoS draws into a
+     * 1024x1024 offscreen target (pitch 2048) every frame, which outranks the
+     * 640x480 back buffer, so every flip presented it -- read at 2048 / 640
+     * bytes a pixel, which nothing decodes, so the window stayed black. A
+     * surface shaped like the display mode wins; size decides among equals. */
+    if (!s_gpu.drawn_stale && s_gpu.drawn_offset) {
+        int cur = is_display_pitch(s_gpu.pitch);
+        int old = is_display_pitch(s_gpu.drawn_pitch);
+        if (old && !cur)
+            return;
+        if (old == cur
+            && s_gpu.clip_w * s_gpu.clip_h < s_gpu.drawn_w * s_gpu.drawn_h)
+            return;
+    }
     s_gpu.drawn_stale = 0;
     s_gpu.drawn_offset = s_gpu.color_offset;
     s_gpu.drawn_pitch = s_gpu.pitch;

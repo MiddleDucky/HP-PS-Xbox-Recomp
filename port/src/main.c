@@ -40,6 +40,7 @@
 
 /* xboxrecomp runtime headers */
 #include <xbox/xboxrecomp.h>
+#include <xbox/host_unwind.h>
 #include "single_instance.h"
 
 /*
@@ -280,7 +281,7 @@ static DWORD WINAPI prof_thread(LPVOID arg)
         te.dwSize = sizeof te;
         for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
             if (te.th32OwnerProcessID != pid || te.th32ThreadID == self) continue;
-            HANDLE t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, te.th32ThreadID);
+            HANDLE t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
             if (!t) continue;
             if (SuspendThread(t) != (DWORD)-1) {
                 CONTEXT c;
@@ -328,6 +329,263 @@ static void prof_start(void)
     CloseHandle(CreateThread(NULL, 0, prof_thread, arg, 0, NULL));
 }
 
+/* [STALL]: the game thread going RECOMP_STALL_MS (default 100) without a Swap is what a player calls a freeze or a
+ * hitch, and the logs only said that one happened (a [LEVELSTART] pause, a slow [FRAME]), never where the title was.
+ *
+ * While it lasts this samples the game thread -- first, the moment the threshold passes, then every 20 ms for the
+ * first second and every 250 ms after -- each line timed when it was taken: the guest return addresses on its stack
+ * (innermost first) and, whenever those change, its guest registers; and its host stack (module+offset; hpps+
+ * offsets resolve with nm on the same hpps.exe, image base 0x140000000). Where every other thread is, collected
+ * without printing and written after, at the start and again at 500 ms. The end line tallies where the samples were.
+ * tools/stall_report.py names all of it. Movies (XMV) hold the Swaps too and show up the same way, the movie player
+ * on the stack. Pairs with [SLOWCALL] (toolkit kernel_bridge.c). RECOMP_STALL_MS=0: off. */
+extern volatile int64_t hpps_last_swap_qpc;  /* scda/xdk/hle_d3d8.cpp */
+
+/* the game thread's guest registers: thread-local, so their addresses are taken on it */
+static uint32_t *g_stall_regs[7];  /* eax ecx edx ebx esi edi esp */
+static DWORD g_stall_tid;
+static unsigned g_stall_ms = 100;
+
+enum { kStallHost = 28, kStallGuest = 16, kStallFast = 50, kStallMax = 120, kStallTally = 64 };
+
+/* the suspended thread's host frames: RIP, then each caller by its unwind data. Nothing here allocates or locks:
+ * the thread being looked at may hold the heap lock */
+/* RIP, then each caller by its unwind data, inside the thread's stack [lo, hi) only: xbox/host_unwind.h (an unchecked
+ * walk read address 0 in Wine's ntdll and crashed the game from the sampler) */
+static int host_unwind(CONTEXT *c, DWORD64 lo, DWORD64 hi, DWORD64 *out, int max)
+{
+    return xbox_host_unwind(c, lo, hi, out, max);
+}
+
+static int stall_host_stack(HANDLE t, DWORD64 *out, int max)
+{
+    CONTEXT c;
+    memset(&c, 0, sizeof c);
+    c.ContextFlags = CONTEXT_FULL;
+    DWORD64 lo, hi;
+    if (!xbox_thread_stack_bounds(t, &lo, &hi) || !GetThreadContext(t, &c)) return 0;
+    return host_unwind(&c, lo, hi, out, max);
+}
+
+/* " module+offset" for each frame, appended to buf */
+static void stall_fmt_host(char *buf, size_t size, const DWORD64 *pc, int n)
+{
+    size_t len = strlen(buf);
+    for (int i = 0; i < n && len + 48 < size; i++) {
+        HMODULE m = NULL;
+        char path[MAX_PATH] = "?";
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)(uintptr_t)pc[i], &m) && m)
+            GetModuleFileNameA(m, path, sizeof path);
+        const char *name = strrchr(path, '\\');
+        name = name ? name + 1 : path;
+        len += (size_t)snprintf(buf + len, size - len, " %.*s+%llX", (int)strcspn(name, "."), name,
+                                (unsigned long long)(pc[i] - (DWORD64)(uintptr_t)m));
+    }
+}
+
+/* the guest return addresses on the game thread's stack, as the crash handler finds them */
+static int stall_guest_chain(uint32_t *out, int max)
+{
+    uint32_t esp = g_stall_regs[6] ? *g_stall_regs[6] : 0;
+    int n = 0;
+    if (!g_xbox_mem_offset || esp < XBOX_STACK_BASE || esp >= XBOX_STACK_TOP) return 0;
+    const uint32_t *sp = (const uint32_t *)((uintptr_t)g_xbox_mem_offset + esp);
+    for (uint32_t i = 0; i < 1024 && n < max && esp + i * 4 < XBOX_STACK_TOP; i++)
+        if (sp[i] > g_xbox_code_lo && sp[i] < g_xbox_code_hi) out[n++] = sp[i];
+    return n;
+}
+
+/* every other thread, suspended one at a time just long enough to walk its stack; printed after */
+typedef struct { DWORD tid; int n; DWORD64 pc[10]; } stall_snap;
+static stall_snap g_stall_snaps[512];
+
+static void stall_threads(unsigned stall, const char *when)
+{
+    DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
+    LARGE_INTEGER f, a, b;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&a);
+    int count = 0;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    THREADENTRY32 te;
+    te.dwSize = sizeof te;
+    for (BOOL ok = Thread32First(snap, &te); ok && count < 512; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != pid || te.th32ThreadID == self || te.th32ThreadID == g_stall_tid) continue;
+        HANDLE t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
+        if (!t) continue;
+        stall_snap *sn = &g_stall_snaps[count];
+        sn->tid = te.th32ThreadID, sn->n = 0;
+        if (SuspendThread(t) != (DWORD)-1) {
+            sn->n = stall_host_stack(t, sn->pc, 10);
+            ResumeThread(t);
+            count++;
+        }
+        CloseHandle(t);
+    }
+    CloseHandle(snap);
+    QueryPerformanceCounter(&b);
+    fprintf(stderr, "[STALL] %u threads %s: %d, walked in %.1f ms\n", stall, when, count,
+            (double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)f.QuadPart);
+    typedef HRESULT (WINAPI *get_desc_fn)(HANDLE, PWSTR *);
+    static get_desc_fn get_desc;
+    if (!get_desc)
+        get_desc = (get_desc_fn)(void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetThreadDescription");
+    for (int i = 0; i < count; i++) {
+        char line[1200], label[64] = "";
+        HANDLE t = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, g_stall_snaps[i].tid);
+        PWSTR desc = NULL;
+        if (t && get_desc && SUCCEEDED(get_desc(t, &desc)) && desc) {
+            if (*desc) snprintf(label, sizeof label, " \"%ls\"", desc);
+            LocalFree(desc);
+        }
+        if (t) CloseHandle(t);
+        snprintf(line, sizeof line, "[STALL]   thread %lu%s:", (unsigned long)g_stall_snaps[i].tid, label);
+        stall_fmt_host(line, sizeof line - 2, g_stall_snaps[i].pc, g_stall_snaps[i].n);
+        strcat(line, "\n");
+        fputs(line, stderr);  /* one write a line: other threads' log lines cannot land inside it */
+    }
+    fflush(stderr);
+}
+
+/* where the samples of one stall were: innermost host frame, first hpps frame, innermost guest return */
+typedef struct { DWORD64 key; unsigned n; } stall_count;
+static void stall_tally(stall_count *t, DWORD64 key)
+{
+    for (int i = 0; i < kStallTally; i++) {
+        if (t[i].n && t[i].key == key) { t[i].n++; return; }
+        if (!t[i].n) { t[i].key = key, t[i].n = 1; return; }
+    }
+}
+
+static void stall_print_tally(char *line, size_t size, const char *what, stall_count *t, int host)
+{
+    size_t len = strlen(line);
+    len += (size_t)snprintf(line + len, size - len, " | %s:", what);
+    for (int shown = 0; shown < 4; shown++) {
+        int best = -1;
+        for (int i = 0; i < kStallTally; i++)
+            if (t[i].n && (best < 0 || t[i].n > t[best].n)) best = i;
+        if (best < 0) break;
+        if (host) {
+            stall_fmt_host(line, size, &t[best].key, 1);
+        } else {
+            len = strlen(line);
+            snprintf(line + len, size - len, " %08llX", (unsigned long long)t[best].key);
+        }
+        len = strlen(line);
+        len += (size_t)snprintf(line + len, size - len, " x%u", t[best].n);
+        t[best].n = 0;
+    }
+}
+
+static DWORD WINAPI stall_thread(LPVOID unused)
+{
+    (void)unused;
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
+    HANDLE game = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION, FALSE, g_stall_tid);
+    if (!game) return 0;
+    const DWORD64 exe = (DWORD64)(uintptr_t)GetModuleHandleA(NULL);
+    unsigned stalls = 0, samples = 0;
+    int64_t in_stall = 0;  /* the Swap the current stall waits after, 0 when none */
+    int second_pass = 0;
+    uint32_t last_guest[kStallGuest];
+    int last_ng = -1;
+    stall_count inner[kStallTally], first_exe[kStallTally], guest_top[kStallTally];
+    for (;;) {
+        Sleep(5);
+        int64_t swap = hpps_last_swap_qpc;
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        if (!swap) continue;  /* nothing shown yet */
+        double ms = (double)(now.QuadPart - swap) * 1000.0 / (double)freq.QuadPart;
+        if (in_stall && swap != in_stall) {
+            char line[1600];
+            snprintf(line, sizeof line, "[STALL] %u ended: %.0f ms without a Swap, %u samples", stalls,
+                     (double)(swap - in_stall) * 1000.0 / (double)freq.QuadPart, samples);
+            stall_print_tally(line, sizeof line - 2, "innermost", inner, 1);
+            stall_print_tally(line, sizeof line - 2, "first hpps frame", first_exe, 1);
+            stall_print_tally(line, sizeof line - 2, "innermost guest", guest_top, 0);
+            strcat(line, "\n");
+            fputs(line, stderr);
+            fflush(stderr);
+            in_stall = 0;
+        }
+        if (ms < g_stall_ms) continue;
+        int begin = !in_stall;
+        if (begin) {
+            if (stalls == 300) continue;  /* enough for one run */
+            in_stall = swap, samples = 0, last_ng = -1, second_pass = 0;
+            memset(inner, 0, sizeof inner);
+            memset(first_exe, 0, sizeof first_exe);
+            memset(guest_top, 0, sizeof guest_top);
+            fprintf(stderr, "[STALL] %u began: no Swap for %.0f ms (game thread %lu)\n", ++stalls, ms,
+                    (unsigned long)g_stall_tid);
+        } else {
+            double due = samples < kStallFast ? g_stall_ms + samples * 20.0
+                                              : g_stall_ms + kStallFast * 20.0 + (samples - kStallFast) * 250.0;
+            if (samples >= kStallMax || ms < due) goto threads;
+        }
+        {
+            DWORD64 pc[kStallHost];
+            uint32_t guest[kStallGuest], regs[7];
+            int nh = 0, ng = 0;
+            QueryPerformanceCounter(&now);
+            ms = (double)(now.QuadPart - swap) * 1000.0 / (double)freq.QuadPart;
+            if (SuspendThread(game) != (DWORD)-1) {
+                nh = stall_host_stack(game, pc, kStallHost);
+                ng = stall_guest_chain(guest, kStallGuest);
+                for (int r = 0; r < 7; r++) regs[r] = g_stall_regs[r] ? *g_stall_regs[r] : 0;
+                ResumeThread(game);
+            }
+            samples++;
+            if (nh) stall_tally(inner, pc[0]);
+            for (int i = 0; i < nh; i++)
+                if (pc[i] - exe < 0x10000000ull) { stall_tally(first_exe, pc[i]); break; }
+            if (ng) stall_tally(guest_top, guest[0]);
+            char line[2400];
+            size_t len;
+            if (ng == last_ng && !memcmp(guest, last_guest, (size_t)ng * 4) && samples > 1) {
+                len = (size_t)snprintf(line, sizeof line, "[STALL] %u +%.0f ms: guest stack as before | host:", stalls,
+                                       ms);
+            } else {
+                len = (size_t)snprintf(line, sizeof line, "[STALL] %u +%.0f ms guest:", stalls, ms);
+                for (int i = 0; i < ng; i++) len += (size_t)snprintf(line + len, sizeof line - len, " %08X", guest[i]);
+                len += (size_t)snprintf(line + len, sizeof line - len,
+                                        " | regs eax=%08X ecx=%08X edx=%08X ebx=%08X esi=%08X edi=%08X esp=%08X | host:",
+                                        regs[0], regs[1], regs[2], regs[3], regs[4], regs[5], regs[6]);
+                memcpy(last_guest, guest, (size_t)ng * 4);
+                last_ng = ng;
+            }
+            (void)len;
+            stall_fmt_host(line, sizeof line - 2, pc, nh);
+            strcat(line, "\n");
+            fputs(line, stderr);
+            fflush(stderr);
+        }
+    threads:
+        if (begin) {
+            stall_threads(stalls, "at the start");
+        } else if (!second_pass && ms >= 500) {
+            second_pass = 1;
+            stall_threads(stalls, "at 500 ms");
+        }
+    }
+    return 0;
+}
+
+static void stall_start(void)
+{
+    const char *e = getenv("RECOMP_STALL_MS");
+    if (e && *e) g_stall_ms = (unsigned)strtoul(e, NULL, 10);
+    if (!g_stall_ms) return;
+    g_stall_regs[0] = &g_eax, g_stall_regs[1] = &g_ecx, g_stall_regs[2] = &g_edx, g_stall_regs[3] = &g_ebx;
+    g_stall_regs[4] = &g_esi, g_stall_regs[5] = &g_edi, g_stall_regs[6] = &g_esp;
+    g_stall_tid = GetCurrentThreadId();
+    CloseHandle(CreateThread(NULL, 0, stall_thread, NULL, 0, NULL));
+}
+
 /* The [CRASH] report: from the exception handler as before (stderr, the run log when debug logs are on), and from
  * crash_filter into hpps_crash.log when they are off. */
 static void print_crash(PEXCEPTION_POINTERS ep)
@@ -363,15 +621,55 @@ static void print_crash(PEXCEPTION_POINTERS ep)
      *   fprintf(stderr, "  Game state: %u\n", state);
      */
 
-    /* Print native stack return addresses for debugging */
+    /* Host side: which thread, which module, the registers and the unwound stack. A fault in a Wine/Proton DLL
+     * on a thread of its own (guest regs all zero) is named only by these: Proton relocates its DLLs near
+     * 0x6FFFFFF00000, so a bare RIP can't be matched to a module afterwards. */
     {
-        uintptr_t *sp = (uintptr_t *)ep->ContextRecord->Rsp;
-        fprintf(stderr, "  Native stack (first 8 return addrs):\n");
-        for (int i = 0; i < 64 && sp[i]; i++) {
-            if (sp[i] >= 0x140000000ULL && sp[i] < 0x150000000ULL) {
-                fprintf(stderr, "    [%d] 0x%llX\n", i, (unsigned long long)sp[i]);
-            }
+        const CONTEXT *r = ep->ContextRecord;
+        char line[1600], label[64] = "";
+        typedef HRESULT (WINAPI *get_desc_fn)(HANDLE, PWSTR *);
+        get_desc_fn get_desc =
+            (get_desc_fn)(void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetThreadDescription");
+        PWSTR desc = NULL;
+        if (get_desc && SUCCEEDED(get_desc(GetCurrentThread(), &desc)) && desc) {
+            if (*desc) snprintf(label, sizeof label, " \"%ls\"", desc);
+            LocalFree(desc);
         }
+        snprintf(line, sizeof line, "  Host thread %lu%s%s, at:", (unsigned long)GetCurrentThreadId(), label,
+                 GetCurrentThreadId() == g_stall_tid ? " (the game thread)" : "");
+        DWORD64 rip = r->Rip;
+        stall_fmt_host(line, sizeof line, &rip, 1);
+        fprintf(stderr, "%s\n", line);
+        fprintf(stderr, "  rax=%016llX rbx=%016llX rcx=%016llX rdx=%016llX\n", r->Rax, r->Rbx, r->Rcx, r->Rdx);
+        fprintf(stderr, "  rsi=%016llX rdi=%016llX rbp=%016llX rsp=%016llX\n", r->Rsi, r->Rdi, r->Rbp, r->Rsp);
+        fprintf(stderr, "  r8 =%016llX r9 =%016llX r10=%016llX r11=%016llX\n", r->R8, r->R9, r->R10, r->R11);
+        fprintf(stderr, "  r12=%016llX r13=%016llX r14=%016llX r15=%016llX\n", r->R12, r->R13, r->R14, r->R15);
+
+        CONTEXT c = *r;
+        DWORD64 pc[kStallHost];
+        DWORD64 lo, hi;
+    xbox_own_stack_bounds(&lo, &hi);
+    int n = host_unwind(&c, lo, hi, pc, kStallHost);
+        strcpy(line, "  Host stack:");
+        stall_fmt_host(line, sizeof line, pc, n);
+        fprintf(stderr, "%s\n", line);
+
+        /* where the unwind data runs out (code without it, or a broken frame): every value on the stack that
+         * lands in a module, zeros skipped */
+        const DWORD64 *sp = (const DWORD64 *)r->Rsp;
+        DWORD64 scan[24];
+        int m = 0;
+        const DWORD64 *top = (const DWORD64 *)((NT_TIB *)NtCurrentTeb())->StackBase;
+        for (int i = 0; i < 256 && m < 24 && sp + i < top; i++) {
+            HMODULE mod = NULL;
+            if (sp[i] && GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                            (LPCSTR)(uintptr_t)sp[i], &mod) && mod)
+                scan[m++] = sp[i];
+        }
+        strcpy(line, "  Stack scan:");
+        stall_fmt_host(line, sizeof line, scan, m);
+        fprintf(stderr, "%s\n", line);
     }
     fflush(stderr);
 }
@@ -708,6 +1006,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     watch_arm();
     prof_start();
+    stall_start();
     xbe_entry_point();
 
     printf("\nGame returned. Cleaning up...\n");

@@ -73,6 +73,8 @@ struct Settings {
     uint32_t sharpen = 0;              // 0 (off) to 100
     bool bean_names = true;            // xboxrecomp: a bean's flavour shown on the screen as Harry picks it up (hle_trainer.c)
     uint32_t speakers = 2;             // xboxrecomp: 2 stereo, 6 5.1 surround (hle_dsound.c, at start)
+    uint32_t language = 0;             // xboxrecomp: the language the game starts in: 0 English, 1 French, 2 German,
+                                       // 3 Spanish, 4 Italian, 5 Dutch, 6 Swedish (RECOMP_LANGUAGE, hle_frontend.c)
     bool kbm = true;                   // keyboard and mouse drive pad 1 alongside a controller
     uint32_t mouse_sensitivity = 50;   // 1 to 100
     bool mouse_invert_y = false;

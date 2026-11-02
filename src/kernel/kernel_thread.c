@@ -11,6 +11,7 @@
  *   - Thread priorities use NT KPRIORITY increments
  */
 
+#include <stdio.h>
 #include "kernel.h"
 #include "xbox_memory_layout.h"   /* XBOX_WORKER_STACK_* + worker-stack decls */
 
@@ -190,15 +191,53 @@ NTSTATUS __stdcall xbox_KeDelayExecutionThread(
         ms = (DWORD)(diff / 10000);
     }
 
-    if (Alertable) {
-        DWORD result = SleepEx(ms, TRUE);
-        if (result == WAIT_IO_COMPLETION)
-            return STATUS_ALERTED;
-    } else {
-        Sleep(ms);
+    {
+        /* [THREAD] timing of time-critical guest threads (the music streamer in HP:CoS sleeps ~10 ms a lap and must
+         * be back within its 20 ms lead): work between sleeps and oversleep, worst per 10 s, and how many laps went
+         * over 15 ms in all */
+        static _Thread_local LARGE_INTEGER t_last;
+        static LARGE_INTEGER freq, report;
+        static volatile LONG laps, slow;
+        static double work_max, over_max;
+        LARGE_INTEGER t0, t1;
+        int critical = GetThreadPriority(GetCurrentThread()) == THREAD_PRIORITY_TIME_CRITICAL;
+        NTSTATUS st = STATUS_SUCCESS;
+        if (critical) {
+            if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+            QueryPerformanceCounter(&t0);
+            if (t_last.QuadPart) {
+                double work = (double)(t0.QuadPart - t_last.QuadPart) * 1000.0 / (double)freq.QuadPart;
+                if (work > work_max) work_max = work;
+            }
+        }
+        if (Alertable) {
+            DWORD result = SleepEx(ms, TRUE);
+            if (result == WAIT_IO_COMPLETION)
+                st = STATUS_ALERTED;
+        } else {
+            Sleep(ms);
+        }
+        if (critical) {
+            double over;
+            QueryPerformanceCounter(&t1);
+            over = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)freq.QuadPart - ms;
+            if (over > over_max) over_max = over;
+            InterlockedIncrement(&laps);
+            if (t_last.QuadPart && (double)(t1.QuadPart - t_last.QuadPart) * 1000.0 / (double)freq.QuadPart > 15.0)
+                InterlockedIncrement(&slow);
+            t_last = t1;
+            if (!report.QuadPart) report = t1;
+            if (t1.QuadPart - report.QuadPart > freq.QuadPart * 10) {
+                fprintf(stderr, "[THREAD] time-critical laps last 10s: %ld, over 15 ms %ld, longest work between "
+                        "sleeps %.1f ms, longest oversleep %.1f ms (asked %lu ms last)\n",
+                        laps, slow, work_max, over_max, (unsigned long)ms);
+                laps = slow = 0;
+                work_max = over_max = 0;
+                report = t1;
+            }
+        }
+        return st;
     }
-
-    return STATUS_SUCCESS;
 }
 
 /* ============================================================================

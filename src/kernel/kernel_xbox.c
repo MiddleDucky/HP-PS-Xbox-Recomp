@@ -199,6 +199,36 @@ static void host_time_zone(HostTimeZone *z)
 #endif
 }
 
+/* xboxrecomp: RECOMP_LANGUAGE (a game's launcher sets it from its settings): the dashboard's language by name or by
+ * its XC_LANGUAGE number - 1 English, 2 Japanese, 3 German, 4 French, 5 Spanish, 6 Italian, 7 Korean, 8 Chinese,
+ * 9 Portuguese. Unset or unknown: English. Read once; a title asks as it starts */
+static ULONG console_language(void)
+{
+    static ULONG lang;
+    if (!lang) {
+        static const char *const names[] = {"english", "japanese", "german", "french", "spanish",
+                                            "italian", "korean", "chinese", "portuguese"};
+        const char *e = getenv("RECOMP_LANGUAGE");
+        lang = 1;
+        if (e && *e) {
+            char *end = NULL;
+            unsigned long n = strtoul(e, &end, 10);
+            if (end != e && n >= 1 && n <= 9) {
+                lang = (ULONG)n;
+            } else {
+                for (ULONG i = 0; i < 9; i++) {
+                    const char *a = e, *b = names[i];
+                    while (*a && (*a | 0x20) == *b) a++, b++;
+                    if (!*a && !*b) lang = i + 1;
+                }
+            }
+        }
+        xbox_log(XBOX_LOG_INFO, XBOX_LOG_XBOX, "console language %u (RECOMP_LANGUAGE %s)", (unsigned)lang,
+                 e && *e ? e : "unset");
+    }
+    return lang;
+}
+
 NTSTATUS __stdcall xbox_ExQueryNonVolatileSetting(
     ULONG ValueIndex, PULONG Type, PVOID Value, ULONG ValueLength, PULONG ResultLength)
 {
@@ -210,9 +240,9 @@ NTSTATUS __stdcall xbox_ExQueryNonVolatileSetting(
 
     switch (ValueIndex) {
     case XC_LANGUAGE:
-        /* English = 1 */
+        /* the console's language, which a title starts in: English = 1 unless RECOMP_LANGUAGE says otherwise */
         if (ValueLength >= sizeof(ULONG)) {
-            *(PULONG)Value = 1;
+            *(PULONG)Value = console_language();
             if (Type) *Type = 4; /* REG_DWORD */
             if (ResultLength) *ResultLength = sizeof(ULONG);
         }

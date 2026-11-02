@@ -639,6 +639,8 @@ HLE(00192BE0, 0) {
 
 // D3DDevice_Swap(flags)
 static std::atomic<uint64_t> g_last_swap_ms{0};
+// when the last Swap happened (QueryPerformanceCounter), for main.c's [STALL] watcher
+extern "C" volatile int64_t hpps_last_swap_qpc = 0;
 static std::atomic<int> g_hud_trace{0};  // xboxrecomp debug: HudTrace, F12
 static uint32_t g_hud_n = 0;
 
@@ -700,6 +702,7 @@ HLE(0019E390, 1) {
         }
         double dt = double(now.QuadPart - last.QuadPart) * 1000.0 / double(freq.QuadPart);
         last = now;
+        hpps_last_swap_qpc = now.QuadPart;
         frames++;
         if (dt > worst) worst = dt;
         if (dt > 25.0) slow++;

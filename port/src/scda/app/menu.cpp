@@ -8,6 +8,7 @@
 #endif
 #include <cstring>
 #include <windows.h>
+#include <shellapi.h>
 
 #include <algorithm>
 #include <atomic>
@@ -24,6 +25,7 @@
 #include "core/log.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
+extern "C" void hpps_MarkState(int mark);  // hle_trainer.c: the game state (Harry, level, pad) into the run log
 extern "C" void xbox_FramebufferWindowSetMsgHook(int (*fn)(void*, unsigned, uintptr_t, intptr_t));
 
 namespace app {
@@ -449,13 +451,38 @@ void DrawPanel(bool start) {
         ImGui::TextDisabled("Off: the flavour is no longer said aloud when Harry picks up a bean.");
         ImGui::EndTabItem();
     }
-    // xboxrecomp: the logs are opened as the game starts (the launcher's hpps_run.log, the kernel's xbox_kernel.log)
+    // xboxrecomp: the Debug tab, as CoS has it: where this run's log is (the launcher writes one per run, always), a
+    // marker line in it for "it happened here" with the game's state under it, and the extra traces
     if (tabs && ImGui::BeginTabItem("Debug")) {
         page = "Debug";
+        static char log_name[MAX_PATH];
+        if (!log_name[0] && !GetEnvironmentVariableA("HPPS_RUN_LOG", log_name, sizeof log_name))
+            std::snprintf(log_name, sizeof log_name, "none (started without the launcher)");
         Row("Logs");
-        if (ImGui::Checkbox("Write debug logs", &s.debug_logs)) Changed();
-        ImGui::TextDisabled("hpps_run.log and xbox_kernel.log beside the game, for reporting a problem.");
-        ImGui::TextDisabled("Takes effect the next time the game starts.");
+        ImGui::TextWrapped("This run's log: %s", log_name);
+        if (ImGui::Button("Open logs folder")) {
+            char dir[MAX_PATH];
+            DWORD n = GetModuleFileNameA(nullptr, dir, sizeof dir);
+            char* slash = n ? std::strrchr(dir, '\\') : nullptr;
+            if (slash) {
+                std::snprintf(slash + 1, size_t(dir + sizeof dir - slash - 1), "logs\\runs");
+                if (GetFileAttributesA(dir) == INVALID_FILE_ATTRIBUTES) *slash = 0;  // started without the launcher
+                ShellExecuteA(nullptr, "open", dir, nullptr, nullptr, SW_SHOWNORMAL);
+            }
+        }
+        ImGui::SameLine();
+        static int marks;
+        if (ImGui::Button("Mark this moment in the log")) {
+            SYSTEMTIME t;
+            GetLocalTime(&t);
+            LOGI("[MARK] %d at %02u:%02u:%02u.%03u (marked from F10's Debug tab)", ++marks, t.wHour, t.wMinute,
+                 t.wSecond, t.wMilliseconds);
+            hpps_MarkState(marks);
+        }
+        if (marks) ImGui::TextDisabled("%d mark%s written: search the log for [MARK]", marks, marks == 1 ? "" : "s");
+        ImGui::TextDisabled("Mark right after something goes wrong, then give the mark's number with your report.");
+        if (ImGui::Checkbox("Extra debug traces", &s.debug_logs)) Changed();
+        ImGui::TextDisabled("More detail in the log (speech, among others). Takes effect the next time the game starts.");
         ImGui::EndTabItem();
     }
     if (tabs) ImGui::EndTabBar();

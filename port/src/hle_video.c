@@ -66,6 +66,42 @@ static int trace_on(void)
     return on;
 }
 
+/* The movie player's loop (sub_00164450 at 0x164630) is the XDK's own:
+ * DirectSoundDoWork, XMVDecoder_GetNextFrame, and round again at once on
+ * XMV_NOFRAME. GetNextFrame polls the field status first thing (its call
+ * returns to 0x1C449E), so a poll that sees the field it saw last time cannot
+ * have a new frame due: wait for the next field there (Sleep is 1 ms, the
+ * timer thread set timeBeginPeriod(1)). Spinning instead held the guest core
+ * flat out, and the kernel timer thread that counts the fields shares that
+ * core: on Windows it got the CPU only between the spinner's quanta, so the
+ * movie clock stalled and the intro movies and the menu ran at a few frames a
+ * second (1.2 s frames in a user's log). RECOMP_XMV_WAIT=0: spin as before. */
+#define XMV_FIELD_POLL_RET 0x001C449Eu
+
+static int xmv_wait_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_XMV_WAIT");
+        on = !(e && *e == '0');
+    }
+    return on;
+}
+
+static uint32_t xmv_field_wait(void)
+{
+    static uint32_t last = 0xFFFFFFFFu;
+    uint32_t v = xbox_Nv2aVblankCount();
+    int ms;
+    /* bounded: with no vblank clock (RECOMP_VBLANK unset) the count never moves */
+    for (ms = 0; v == last && ms < 20; ms++) {
+        Sleep(1);
+        v = xbox_Nv2aVblankCount();
+    }
+    last = v;
+    return v;
+}
+
 /* D3DDevice_GetDisplayFieldStatus(pFieldStatus): { Field, VBlankCount }. The
  * runtime's 60 Hz count, progressive (field 3, as the XDK reports when the mode
  * is not interlaced). */
@@ -75,7 +111,8 @@ void sub_001934C0(void)
     static DWORD t0;
     uint32_t p = ARG(0);
     if (d3d_hle() && p) {
-        MEM32(p + 4) = xbox_Nv2aVblankCount();
+        MEM32(p + 4) = MEM32(g_esp) == XMV_FIELD_POLL_RET && xmv_wait_on()
+                           ? xmv_field_wait() : xbox_Nv2aVblankCount();
         MEM32(p) = 3;
         g_esp += 8;
     } else {

@@ -23,7 +23,7 @@ fi
 # HPPS_NO_ART: no game artwork inside the exes given to others (now the case in every build)
 # HPPS_FORTIFY=OFF: no _FORTIFY_SOURCE (a player's main-menu keyboard hitch on Windows, gone in a build without the
 # release hardening, 2026-10-25); the stack canaries stay
-cmake -S . -B build-release "${cross[@]}" -DCMAKE_BUILD_TYPE=Release -DHPPS_RELEASE=ON -DHPPS_NO_ART=ON -DHPPS_FORTIFY=OFF -DHPPS_VERSION="${VERSION:-0.3.0}" \
+cmake -S . -B build-release "${cross[@]}" -DCMAKE_BUILD_TYPE=Release -DHPPS_RELEASE=ON -DHPPS_NO_ART=ON -DHPPS_FORTIFY=OFF -DHPPS_VERSION="${VERSION:-0.4.0}" \
       > logs/build-release-config.log
 nice -n 10 cmake --build build-release -j"$(nproc)" --target hpps hpps_launcher > logs/build-release.log 2>&1 ||
     { tail -30 logs/build-release.log; exit 1; }

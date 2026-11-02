@@ -453,3 +453,32 @@ static void pause_row(void)
         if (t[0]) call_guest(sub_00169A40_gen, 1, t);
     }
 }
+
+/* ── The language the game starts in ────────────────────────────────────────────────────────────────────────────
+ *
+ * As it starts, the title takes the console's language (XGetLanguage, sub_00154283, in 0x151C8D: 1 English, 3 German,
+ * 4 French, 5 Spanish, 6 Italian; others English) and sets it with sub_0002A790 (called from 0x151D10). The index
+ * goes to [0x32E210]: 1 English, 2 French, 3 German, 4 Spanish, 5 Italian, 6 Dutch, 7 Swedish - the seven this disc
+ * carries speech for, which the main menu's Language row offers (its flag list, 0x1EE56; its own call is 0x1C8C0).
+ * The launcher's Language (hpps.toml language, RECOMP_LANGUAGE) replaces the console's at that start-up call, so
+ * Dutch and Swedish, which no Xbox dashboard has, can be chosen too; the menu's row still changes it.
+ * Built with --exclude-manual like the rest of this file; gen's sub_0002A790 renamed _gen by hand until a regen. */
+extern void sub_0002A790_gen(void);
+void sub_0002A790(void)
+{
+    static const char *const names[] = {"english", "french", "german", "spanish", "italian", "dutch", "swedish"};
+    const char *e = getenv("RECOMP_LANGUAGE");
+    if (MEM32(g_esp) == 0x00151D15u && e && *e) {
+        for (uint32_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+            const char *a = e, *b = names[i];
+            while (*a && (*a | 0x20) == *b) a++, b++;
+            if (!*a && !*b) {
+                fprintf(stderr, "[PORT] language: %s (index %u, the console's gave %u)\n", names[i], i + 1,
+                        MEM32(g_esp + 4));
+                MEM32(g_esp + 4) = i + 1;
+                break;
+            }
+        }
+    }
+    sub_0002A790_gen();
+}

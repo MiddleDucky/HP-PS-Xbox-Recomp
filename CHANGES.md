@@ -1,5 +1,24 @@
 # Changes
 
+## v0.4.0 (2026-11-02), compared with v0.3.0
+
+### New options
+- **Language** (launcher): the game starts in English, French, German, Spanish, Italian, Dutch or Swedish, the seven the disc has speech for. Dutch and Swedish, which no Xbox dashboard offers, can be chosen too; the game's own menu can still change it.
+
+### Smoother play
+- **Movies and the main menu run at full speed.** The movie player no longer spins on the game's CPU core while it waits for the next frame, which held back the game's own clock: intro movies and the main menu could drop to about 20 fps on Windows.
+- **Timing and threading fixes from the Chamber of Secrets port.** A game timer could miss a wake-up and stop now and then (in Chamber of Secrets it silenced the level music); the game's threads now share their CPU core as they do there.
+
+### Fixes
+- **16:9 free look:** looking up no longer moves the life bar and the rest of the HUD to their 4:3 places.
+- **No more crash during a long pause** (for example the save check after answering "no" to loading a save). The crash came from the port's own diagnostics.
+- **The retail DVD's untouched `default.xbe`** passes the launcher's file check too.
+
+### Logs
+- **A log every run.** The launcher writes `logs\runs\hpps_run_<date_time>.log` and `xbox_kernel_<date_time>.log` each time, keeping the newest 10, so a problem always leaves a log. "Write debug logs" is now **Extra debug traces** and only adds detail.
+- **F10 > Debug:** "Open logs folder" and **"Mark this moment in the log"**, which writes a numbered mark with where Harry is and what he is doing. Press it right after something goes wrong and give the number with your report.
+- **Crash reports name the faulting module and thread**, and a long pause logs what the game was doing.
+
 ## v0.3.0 (2026-10-30), compared with v0.2.1
 
 ### New options

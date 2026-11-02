@@ -12,6 +12,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <xbox/host_unwind.h>
 #include <tlhelp32.h>
 #include <mmsystem.h>
 
@@ -158,23 +159,12 @@ static void stack_dump_to(const char *path)
             memset(&ctx, 0, sizeof(ctx));
             ctx.ContextFlags = CONTEXT_FULL;
             if (GetThreadContext(th, &ctx)) {
+                /* xbox/host_unwind.h: inside the thread's stack only (an unchecked walk read address 0 in Wine's
+                 * ntdll and crashed the game) */
+                DWORD64 pcs[48], lo, hi;
+                int npc = xbox_thread_stack_bounds(th, &lo, &hi) ? xbox_host_unwind(&ctx, lo, hi, pcs, 48) : 0;
                 fprintf(f, "thread %lu:", (unsigned long)te.th32ThreadID);
-                for (int i = 0; i < 48 && ctx.Rip; i++) {
-                    DWORD64 base = 0;
-                    PRUNTIME_FUNCTION fn;
-                    fprintf(f, " %llx", (unsigned long long)ctx.Rip);
-                    fn = RtlLookupFunctionEntry(ctx.Rip, &base, NULL);
-                    if (fn) {
-                        PVOID data;
-                        DWORD64 frame;
-                        RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, ctx.Rip, fn, &ctx, &data, &frame, NULL);
-                    } else {
-                        /* leaf: the return address is on top of the stack */
-                        if (IsBadReadPtr((void *)ctx.Rsp, 8)) break;
-                        ctx.Rip = *(DWORD64 *)ctx.Rsp;
-                        ctx.Rsp += 8;
-                    }
-                }
+                for (int i = 0; i < npc; i++) fprintf(f, " %llx", (unsigned long long)pcs[i]);
                 fputc('\n', f);
             }
             ResumeThread(th);

@@ -155,6 +155,39 @@ static size_t xbox_TiledApertureSize(void)
     return g_memory_size < max ? g_memory_size : max;
 }
 
+/* Whether host [addr, addr + size) is all free address space. */
+static BOOL host_range_free(uintptr_t addr, uint64_t size)
+{
+    uintptr_t end = addr + (uintptr_t)size;
+    while (addr < end) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery((LPCVOID)addr, &mbi, sizeof(mbi)) || mbi.State != MEM_FREE)
+            return FALSE;
+        addr = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+    }
+    return TRUE;
+}
+
+/* Whether the fixed guest ranges xbox_MemoryLayoutInit maps past the base
+ * view are free at this offset: the RAM mirrors (those it would not skip for
+ * the tiled aperture), the contiguous window, the tiled aperture and the
+ * NV2A, MCPX and flash apertures. */
+static BOOL layout_fits(uintptr_t offset)
+{
+    uint64_t tiled_lo = XBOX_TILED_BASE;
+    uint64_t tiled_hi = tiled_lo + xbox_TiledApertureSize();
+    for (int m = 0; m < XBOX_NUM_MIRRORS; m++) {
+        uint64_t lo = (uint64_t)(m + 1) * g_memory_size, hi = lo + g_memory_size;
+        if (lo < tiled_hi && tiled_lo < hi) continue;
+        if (!host_range_free(offset + (uintptr_t)lo, g_memory_size)) return FALSE;
+    }
+    return host_range_free(offset + XBOX_CONTIG_BASE, XBOX_CONTIG_SIZE) &&
+           host_range_free(offset + XBOX_TILED_BASE, xbox_TiledApertureSize()) &&
+           host_range_free(offset + XBOX_NV2A_BASE, XBOX_NV2A_SIZE) &&
+           host_range_free(offset + XBOX_MCPX_BASE, XBOX_MCPX_SIZE) &&
+           host_range_free(offset + XBOX_FLASH_BASE, XBOX_FLASH_SIZE);
+}
+
 static HANDLE g_nv2a_ack_thread = NULL;
 static volatile LONG g_nv2a_ack_stop = 0;
 
@@ -1799,33 +1832,6 @@ volatile uint32_t g_icall_trace[16] = {0};
 volatile uint32_t g_icall_trace_idx = 0;
 volatile uint64_t g_icall_count = 0;
 
-#ifdef _WIN32
-static int layout_reserve_free(uintptr_t at, size_t size)
-{
-    LPVOID r = VirtualAlloc((LPVOID)at, size, MEM_RESERVE, PAGE_NOACCESS);
-    if (!r) return 0;
-    VirtualFree(r, 0, MEM_RELEASE);
-    return (uintptr_t)r == at;
-}
-
-/* Whether the host ranges the layout puts above a base are free: the RAM mirrors (base + 64 MB on, as many as the
- * mirror loop maps), the contiguous window (guest 0x80000000) and the tiled aperture (guest 0xF0000000). Each is
- * reserved and handed back at once; one already taken (error 487) rules the base out. */
-static int layout_fits(uintptr_t base)
-{
-    uint64_t tiled_lo = XBOX_TILED_BASE, tiled_hi = tiled_lo + XBOX_CONTIG_SIZE;
-    for (int m = 0; m < XBOX_NUM_MIRRORS; m++) {
-        uint64_t lo = (uint64_t)(m + 1) * g_memory_size, hi = lo + g_memory_size;
-        if (lo < tiled_hi && tiled_lo < hi) continue;  /* skipped by the mirror loop as well */
-        if (!layout_reserve_free(base + (uintptr_t)lo, g_memory_size)) return 0;
-    }
-    return layout_reserve_free(base + XBOX_CONTIG_BASE, XBOX_CONTIG_SIZE) &&
-           layout_reserve_free(base + (uintptr_t)XBOX_TILED_BASE, XBOX_CONTIG_SIZE);
-}
-#else
-static int layout_fits(uintptr_t base) { (void)base; return 1; }
-#endif
-
 BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
 {
     g_force_return = getenv("RECOMP_FORCE_RETURN") != NULL;
@@ -1888,6 +1894,15 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
             0x01000000,             /* 16 MB */
             0x02000000,             /* 32 MB */
             0x10000000,             /* 256 MB */
+            /* Above 4 GB: the whole guest window (RAM, mirrors, contiguous
+             * window, tiled aperture, device apertures) in address space the
+             * host left alone. GE-Proton's Wine 11.0 puts apisetschema.dll and
+             * the locale tables at 0x10000-0xBE1000 and opengl32.dll at
+             * 0x7BEE0000, so every base above failed or left mirrors and the
+             * tiled aperture on top of host mappings (error 487, then a fault
+             * on the first rendering write). */
+            0x200000000ULL, 0x300000000ULL, 0x400000000ULL, 0x800000000ULL,
+            0x1000000000ULL, 0x2000000000ULL,
             0,                      /* sentinel - let OS choose */
         };
 
@@ -1943,12 +1958,15 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                     g_memory_base = NULL;
                     continue;
                 }
-                if (try_bases[i] != 0 && !layout_fits((uintptr_t)g_memory_base)) {
-                    /* the base is free but what has to follow it is not: Wine 11 holds ranges above 0x10000000
-                     * (mirrors 26-27 at 0x78000000 and the tiled aperture at 0x100000000 failed with error 487,
-                     * and Philosopher's Stone's intro video then wrote through the missing aperture) */
-                    fprintf(stderr, "  base %p: free, but the mirrors or apertures above it are taken; next\n",
-                            g_memory_base);
+                /* the base alone is not enough: everything placed at a fixed guest address relative to it has to fit
+                 * too. Wine 11 holds ranges above 0x10000000 (mirrors 26-27 at 0x78000000 and the tiled aperture at
+                 * 0x100000000 failed with error 487, and Philosopher's Stone's intro video then wrote through the
+                 * missing aperture) */
+                if (try_bases[i] != 0 &&
+                    !layout_fits((uintptr_t)g_memory_base - XBOX_MAP_START)) {
+                    fprintf(stderr, "xbox_MemoryLayoutInit: base %p taken by the"
+                            " host further up (mirrors / apertures), trying the"
+                            " next\n", g_memory_base);
                     UnmapViewOfFile(g_memory_base);
                     g_memory_base = NULL;
                     continue;
@@ -2997,9 +3015,12 @@ static SRWLOCK g_heap_lock = SRWLOCK_INIT;
  * Reuse below hands a whole freed block to whatever asks next, however small,
  * and freeing skips over the empty slots that merging leaves behind, so a
  * title that allocates and frees a lot drains the heap far faster than it
- * uses it. Fixing that changes which address every later allocation gets, in
- * every title that ever frees, so it is off unless asked for. Read once: the
- * heap is hit constantly and the answer does not change. */
+ * uses it. On by default since 2026-10-24, as the console gives memory back:
+ * without it HP:CoS's RtlHeap failed to decommit and retried ~38k times a
+ * session, where the console decommits once (checked over xbdm).
+ * RECOMP_HEAP_RECLAIM=0 turns it off; it changes which address every later
+ * allocation gets. Read once: the heap is hit constantly and the answer does
+ * not change. */
 int xbox_HeapReclaimEnabled(void)
 {
     static int on = -1;

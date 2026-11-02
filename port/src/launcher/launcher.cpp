@@ -52,10 +52,14 @@ struct Settings {
     uint32_t mouse_sens = 50;
     bool vibration = true, invert_x = false, invert_y = false;
     bool controller = true;  // the in-game F10 option of the same name
+    int language = 0;        // the language the game starts in (kLanguageKeys)
 };
 
 const char* const kColorBlindKeys[] = {"off", "protanopia", "deuteranopia", "tritanopia"};
 const char* const kColorBlindNames[] = {"Off", "Protanopia (red-weak)", "Deuteranopia (green-weak)", "Tritanopia (blue-weak)"};
+
+const char* const kLanguageKeys[] = {"english", "french", "german", "spanish", "italian", "dutch", "swedish"};
+const char* const kLanguageNames[] = {"English", "Fran\xC3\xA7" "ais", "Deutsch", "Espa\xC3\xB1ol", "Italiano", "Nederlands", "Svenska"};
 
 const char* const kDisplayKeys[] = {"windowed", "borderless", "fullscreen"};
 const char* const kDisplayNames[] = {"Windowed", "Borderless", "Fullscreen"};
@@ -147,6 +151,9 @@ Settings Load() {
     s.controller = Value("controller") != "false";
     s.invert_x = Value("invert_camera_x") == "true";
     s.invert_y = Value("invert_camera_y") == "true";
+    std::string lang = Value("language");
+    for (int i = 0; i < 7; i++)
+        if (lang == kLanguageKeys[i]) s.language = i;
     return s;
 }
 
@@ -172,6 +179,7 @@ void Save(const Settings& s) {
     SetValue("controller", s.controller ? "true" : "false");
     SetValue("invert_camera_x", s.invert_x ? "true" : "false");
     SetValue("invert_camera_y", s.invert_y ? "true" : "false");
+    SetValue("language", q(kLanguageKeys[s.language]));
     std::ofstream f(TomlPath(), std::ios::trunc);
     for (const auto& l : g_lines) f << l << "\n";
 }
@@ -210,6 +218,23 @@ void FitSize(Settings& s) {
     s.height = m.front().second;
 }
 
+// logs\runs keeps the newest 10 runs (each a game log and a kernel log), as CoS's launcher does: the newest ones are
+// the ones a problem report needs. Names sort by time
+static void PruneLogs(const std::wstring& runs) {
+    for (const wchar_t* kind : {L"hpps_run_*.log", L"xbox_kernel_*.log"}) {
+        std::vector<std::wstring> names;
+        WIN32_FIND_DATAW fd;
+        HANDLE f = FindFirstFileW((runs + kind).c_str(), &fd);
+        if (f == INVALID_HANDLE_VALUE) continue;
+        do names.push_back(fd.cFileName);
+        while (FindNextFileW(f, &fd));
+        FindClose(f);
+        std::sort(names.begin(), names.end());
+        // this run's pair is made after: keep 9 so 10 are left
+        for (size_t k = 0; k + 9 < names.size(); k++) DeleteFileW((runs + names[k]).c_str());
+    }
+}
+
 // hpps.exe beside this one, with the environment the game expects (debug.env beside it can add to it)
 std::string FilesLogLine();
 
@@ -231,14 +256,25 @@ bool StartGame() {
     SetEnvironmentVariableW(HPPS_LAUNCHER_ENV, L"1");
     std::wstring dir = ExeDir(), exe = dir + L"hpps.exe";
     std::wstring cmd = L"\"" + exe + L"\"";
-    // the game's console output (its [CRASH] reports among it) to hpps_run.log beside it: a windowed launcher has no
-    // console to hand down. Only with debug_logs (F10 > Debug) on; off, the output goes nowhere and no file is made
-    Load();
-    bool logs = Value("debug_logs") == "true";
+    // the game's console output (its [CRASH] reports among it) to logs\runs\hpps_run_<date_time>.log: a windowed
+    // launcher has no console to hand down. Every run, as CoS's launcher does (with debug_logs gating it, a problem
+    // met with the setting off left nothing to look at); debug_logs now only adds extra traces. The kernel's log
+    // beside it under the same time (XBOX_KERNEL_LOG), and the name for F10's Debug tab (HPPS_RUN_LOG)
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    wchar_t stamp[32];
+    swprintf(stamp, 32, L"%04u%02u%02u_%02u%02u%02u", now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute,
+             now.wSecond);
+    CreateDirectoryW((dir + L"logs").c_str(), nullptr);
+    CreateDirectoryW((dir + L"logs\\runs").c_str(), nullptr);
+    PruneLogs(dir + L"logs\\runs\\");
+    std::wstring run_log = L"logs\\runs\\hpps_run_" + std::wstring(stamp) + L".log";
+    std::wstring kernel_log = L"logs\\runs\\xbox_kernel_" + std::wstring(stamp) + L".log";
+    SetEnvironmentVariableW(L"HPPS_RUN_LOG", run_log.c_str());
+    SetEnvironmentVariableW(L"XBOX_KERNEL_LOG", kernel_log.c_str());
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
-    HANDLE log = logs ? CreateFileW((dir + L"hpps_run.log").c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa,
-                                    CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)
-                      : INVALID_HANDLE_VALUE;
+    HANDLE log = CreateFileW((dir + run_log).c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS,
+                             FILE_ATTRIBUTE_NORMAL, nullptr);
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     if (log != INVALID_HANDLE_VALUE) {
@@ -655,6 +691,7 @@ bool DrawPage(Settings& s, std::string& error, FilesAction& files) {
     ImGui::Checkbox("Vsync", &s.vsync);
     const char* const kFps[] = {"Game's rate (60 fps)", "30 fps", "Unlocked (experimental)"};
     ImGui::Combo("Frame rate", &s.fps, kFps, 3);
+    ImGui::Combo("Language", &s.language, kLanguageNames, 7);
     ImGui::Combo("Colour-blind filter", &s.colorblind, kColorBlindNames, 4);
     if (s.colorblind) {
         int st = int(s.cb_strength);
