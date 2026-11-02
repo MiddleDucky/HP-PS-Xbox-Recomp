@@ -144,7 +144,10 @@ Graphics
                          the HUD), off by default
     Sharpening           contrast-adaptive sharpening, off by default
     Field of view (experimental)
-                         80 to 130 % of the game's; 100 is the game's own
+                         80 to 130 % of the game's; 80 by default. A wider
+                         view can make the camera stick at some places
+                         (it stays put while Harry moves on); lower it if
+                         that happens
 
 Controls
   Keyboard and mouse

@@ -7,13 +7,16 @@
  * itself at +8; +0x28 is its skeleton root, a scene node with the 4x4 world matrix at +0x40 (translation +0x70).
  * Her meshes are scene nodes at the root's exact position, drawn by the mesh type's draw callback
  * sub_0016FAC0(node, ...) (registered by sub_00170210); a node standing exactly where a listed character's root
- * stands is not drawn (the callback's own early out, 0x16FFB0, draws nothing either).
+ * stands is not drawn (the callback's own early out, 0x16FFB0, draws nothing either). Not when her root is at the
+ * world's origin (put away: the level's own meshes stand there, and the whole room went undrawn), and at most 16
+ * distinct meshes at one place ([HIDE] says when that stops it).
  *
  * Built into the recompile with --exclude-manual port/src/hle_world.c (regen.sh); until a regen the generated body
  * of sub_0016FAC0 (recomp_0004.c) is renamed _gen by hand. RECOMP_HIDE_CHARACTERS=0 draws them.
  */
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -83,11 +86,33 @@ void sub_0016FAC0(void)
             if (!g_ent[i]) continue;
             uint32_t root = MEM32(g_ent[i] + 0x28);
             if (!guest_ptr(root) || node == root) continue;
-            if (MEM32(node + 0x70) == MEM32(root + 0x70) && MEM32(node + 0x74) == MEM32(root + 0x74) &&
-                MEM32(node + 0x78) == MEM32(root + 0x78)) {
-                g_esp += 4;  /* the callback's ret, undrawn */
-                return;
+            const uint32_t rx = MEM32(root + 0x70), ry = MEM32(root + 0x74), rz = MEM32(root + 0x78);
+            /* a root at the world's origin is a character put away: the level's own meshes stand there (their
+             * vertices are in world space), and matching them hid the whole room (the Erised cutscene in night3
+             * and night3 after it, 2026-11-02) */
+            if (!((rx | ry | rz) & 0x7FFFFFFFu)) continue;
+            if (MEM32(node + 0x70) != rx || MEM32(node + 0x74) != ry || MEM32(node + 0x78) != rz) continue;
+            /* and at most a character's worth of meshes at one place: past 16 distinct nodes it is not her, and
+             * nothing is hidden there until her root moves */
+            static uint32_t at[NHIDDEN][3], nodes[NHIDDEN][16], nnodes[NHIDDEN];
+            static int off[NHIDDEN];
+            if (at[i][0] != rx || at[i][1] != ry || at[i][2] != rz)
+                at[i][0] = rx, at[i][1] = ry, at[i][2] = rz, nnodes[i] = 0, off[i] = 0;
+            if (off[i]) continue;
+            unsigned k = 0;
+            while (k < nnodes[i] && nodes[i][k] != node) k++;
+            if (k == nnodes[i]) {
+                if (nnodes[i] == 16) {
+                    off[i] = 1;
+                    fprintf(stderr, "[HIDE] %s: over 16 meshes at her place (%.1f %.1f %.1f), not her: none hidden "
+                            "there until she moves\n", kHidden[i], MEMF(root + 0x70), MEMF(root + 0x74),
+                            MEMF(root + 0x78));
+                    continue;
+                }
+                nodes[i][nnodes[i]++] = node;
             }
+            g_esp += 4;  /* the callback's ret, undrawn */
+            return;
         }
     }
     sub_0016FAC0_gen();

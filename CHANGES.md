@@ -1,5 +1,13 @@
 # Changes
 
+## v0.4.1 (2026-11-02), hotfix
+
+### Fixes
+- **Rooms no longer go black from the Mirror of Erised cutscene on** (issue #6). From that cutscene in the night after Diffindo, only Harry, Peeves and the eyes were drawn, and the room stayed black afterwards. The cause was the port's own fix that hides the pupil floating beside the cloisters corridor wall: it hid every mesh standing where she stood, and in that part of the game she is put away at the very spot all the room's meshes share. It now leaves that spot alone, and never hides more than one character's worth of meshes.
+
+### Changes
+- **Field of view is 80 % by default** (F10 > Graphics). In 16:9 that keeps the camera's width close to the console's, which the game's camera relies on: with a wider view the camera could stick at one place while Harry moved on. F10 now says so under the slider. Settings saved before keep their value; F10's Defaults sets 80.
+
 ## v0.4.0 (2026-11-02), compared with v0.3.0
 
 ### New options

@@ -45,7 +45,9 @@ struct Settings {
     uint32_t brightness = 50;          // 0 to 100, 50 each leaves the picture alone
     uint32_t contrast = 50;
     bool fps_counter = false;
-    uint32_t fov = 100;                // xboxrecomp: field of view, % of the game's (hle_video.c), 80 to 130
+    uint32_t fov = 80;                 // xboxrecomp: field of view, % of the game's (hle_video.c), 80 to 130; 80 by
+                                       // default: in 16:9 that keeps the camera's width near the console's 4:3 one, which
+                                       // its logic reads back (wider, the camera stuck at one place, day3diffindo 2026-11-02)
     bool vsync = true;                 // RECOMP_VSYNC
     bool cutscene_bars = true;         // xboxrecomp: 16:9's zoomed cutscenes keep the console's black bars over the picture
     bool debug_logs = false;           // RECOMP_DEBUG_LOGS: hpps_run.log (launcher) and xbox_kernel.log, from the next start

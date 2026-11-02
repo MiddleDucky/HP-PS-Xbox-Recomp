@@ -391,6 +391,9 @@ void DrawPanel(bool start) {
     int fv = int(std::clamp(s.fov, 80u, 130u));
     if (ImGui::SliderInt("Field of view (experimental)", &fv, 80, 130, fv == 100 ? "as the game" : "%d %%")) s.fov = uint32_t(fv);
     if (ImGui::IsItemDeactivatedAfterEdit()) Changed();
+    // xboxrecomp: the game's camera logic reads the widened view back (hle_video.c); above 80 % in 16:9 a camera
+    // could hold one place while Harry ran on (day3diffindo, 2026-11-02)
+    ImGui::TextDisabled("80 %% recommended. A wider view can make the camera stick at some places; lower it if it does.");
     // xboxrecomp (from hpcos): post-processing, off by default
     Row("Post-processing");
     if (ImGui::Checkbox("Bloom", &s.bloom)) Changed();
