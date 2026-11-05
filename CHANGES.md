@@ -1,5 +1,10 @@
 # Changes
 
+## v0.4.2 (2026-11-05), hotfix
+
+### Fixes
+- **No more false "disc dirty or damaged" error in long sessions.** The game opens a new handle every time the controller rumbles and never closes it, which the Xbox allows. The port had room for only 16,384 of them, so after a few hours of play the next file the game opened failed, and the game blamed the disc. Your game files were fine. The port now keeps handles the way the Xbox kernel does, with no fixed limit.
+
 ## v0.4.1 (2026-11-02), hotfix
 
 ### Fixes

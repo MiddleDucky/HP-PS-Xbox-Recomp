@@ -463,7 +463,7 @@ struct bridge_thread_start {
     uint32_t thread_id;
 };
 
-static void bridge_write_handle(uint32_t handle_va, HANDLE h);
+static NTSTATUS bridge_write_handle(uint32_t handle_va, HANDLE h);
 
 static void bridge_run_thread_inline(recomp_func_t fn, uint32_t ctx1,
                                      uint32_t ctx2)
@@ -681,7 +681,7 @@ static void bridge_forget_file_name(uint32_t token);
 /* Handle-table helpers; defined further below. Xbox memory slots are 32-bit
  * but native HANDLEs are 64-bit pointers, so handles are kept in a table and
  * referenced by tagged 32-bit tokens. */
-static void   bridge_write_handle(uint32_t handle_va, HANDLE h);
+static NTSTATUS bridge_write_handle(uint32_t handle_va, HANDLE h);
 static HANDLE bridge_take_handle(uint32_t token);
 
 static void bridge_NtClose(void)
@@ -696,10 +696,20 @@ static void bridge_NtClose(void)
     bridge_forget_async_handle(raw_handle);
     bridge_forget_file_name(raw_handle);
 
-    /* Close real handles but skip fake/synthetic ones */
-    if (raw_handle && raw_handle != 0xDEAD0001u && raw_handle != 0xBEEF0010u) {
+    /* Fake handles the bridge gives out have nothing behind them. */
+    if (raw_handle == 0xDEAD0001u || raw_handle == 0xDECD0001u ||
+        raw_handle == 0xBEEF0001u || raw_handle == 0xBEEF0002u ||
+        raw_handle == 0xBEEF0010u) {
+        g_eax = 0; /* STATUS_SUCCESS */
+        return;
+    }
+    {
         HANDLE h = bridge_take_handle(raw_handle);
-        if (h && h != INVALID_HANDLE_VALUE) {
+        if (!h) {
+            g_eax = 0xC0000008u; /* STATUS_INVALID_HANDLE, as the kernel's NtClose */
+            return;
+        }
+        if (h != INVALID_HANDLE_VALUE) {
 #ifdef _WIN32
             xbox_dir_context_drop(h);
 #endif
@@ -1557,9 +1567,8 @@ static void bridge_NtCreateEvent(void)
         XBOX_TO_NATIVE(obj_attr_ptr),
         event_type, initial_state);
 
-    if (handle_ptr) {
-        bridge_write_handle(handle_ptr, local_handle);
-    }
+    if (handle_ptr && NT_SUCCESS(status))
+        status = bridge_write_handle(handle_ptr, local_handle);
 
     fprintf(stderr, "  [BRIDGE] NtCreateEvent: handle_ptr=0x%08X type=%u init=%u → status=0x%08X handle=0x%08X\n",
             handle_ptr, event_type, initial_state, (uint32_t)status,
@@ -3009,50 +3018,146 @@ static void bridge_write_iostatus(uint32_t ios_va, NTSTATUS status, uint32_t inf
 }
 
 /*
- * Handle table.
+ * Handle table, as the Xbox kernel keeps it (read from xboxkrnl over xbdm,
+ * 2026-11-04: ObInsertObject and the allocator, lookup and free it calls).
  *
- * Xbox memory only has 32-bit handle slots, but native HANDLEs are 64-bit
- * pointers (win32_compat objects, or real Win32 handles on Windows). Map
- * 32-bit tokens <-> native HANDLEs so a handle survives a round-trip through
- * Xbox memory. Tokens carry a tag in the high byte so they never collide
- * with the synthetic handles (0xDEAD0001 / 0xBEEF0010) used elsewhere.
+ * A handle is a slot number times four: 4, 8, 12... Handle 0 is reserved and
+ * the low two bits are ignored. Slots come in blocks of 64, added when the free
+ * list runs dry, reached through a root table that grows by 8 pointers. Free
+ * slots form a list, last freed first. There is no maximum: the only failure
+ * is memory, reported as STATUS_INSUFFICIENT_RESOURCES.
+ *
+ * The console's slot holds the object; ours holds the native HANDLE, which is
+ * 64 bits and so doesn't fit a guest slot. Guest memory only ever has the
+ * handle value. Fake handles (0xBEEF0010, 0xDEAD0001...) are above any real
+ * one, and the kernel raises IRQL where we take a lock.
+ *
+ * HP:CoS leaks an event per rumble call (sub_00018F20), 60 a second while a
+ * spell charges. It held 933,888 of them on a console, stopping only when
+ * memory ran low. A fixed table of 16,384 ran out after 92 minutes, every open
+ * after that got handle 0, and the title reported a dirty disc (issue #15).
  */
-#define BRIDGE_HANDLE_TAG  0x48000000u
-#define BRIDGE_HANDLE_MASK 0x00FFFFFFu
-#define BRIDGE_HANDLE_MAX  16384
-static HANDLE s_handle_table[BRIDGE_HANDLE_MAX];
+#define OB_HANDLES_PER_BLOCK   64u
+#define OB_BLOCKS_PER_ROOT_ADD 8u
+#define OB_BLOCK_SPAN          0x100u  /* handle values per block */
+#define OB_ROOT_ADD_SPAN       0x800u  /* handle values per root growth */
+#define OB_NO_FREE_HANDLE      0xFFFFFFFFu
 
-static uint32_t bridge_handle_token(HANDLE h)
+typedef struct { HANDLE object; uint32_t next_free; } ob_slot;
+
+static ob_slot **s_ob_root;
+static uint32_t  s_ob_first_free = OB_NO_FREE_HANDLE;
+static uint32_t  s_ob_next_needing_pool;  /* first handle value with no block */
+static uint32_t  s_ob_count;
+static CRITICAL_SECTION s_ob_lock;
+static volatile LONG s_ob_lock_state;     /* 0 none, 1 being set up, 2 ready */
+
+static void ob_lock(void)
 {
-    int i;
-    if (!h || h == INVALID_HANDLE_VALUE) return 0;
-    for (i = 1; i < BRIDGE_HANDLE_MAX; i++)
-        if (s_handle_table[i] == h) return BRIDGE_HANDLE_TAG | (uint32_t)i;
-    for (i = 1; i < BRIDGE_HANDLE_MAX; i++)
-        if (s_handle_table[i] == NULL) {
-            s_handle_table[i] = h;
-            return BRIDGE_HANDLE_TAG | (uint32_t)i;
+    if (s_ob_lock_state != 2) {
+        if (InterlockedCompareExchange(&s_ob_lock_state, 1, 0) == 0) {
+            InitializeCriticalSection(&s_ob_lock);
+            s_ob_lock_state = 2;
+        } else {
+            while (s_ob_lock_state != 2) Sleep(0);
         }
-    fprintf(stderr, "  [BRIDGE] handle table full\n");
-    return 0;
+    }
+    EnterCriticalSection(&s_ob_lock);
+}
+#define ob_unlock() LeaveCriticalSection(&s_ob_lock)
+
+/* Add a block of free slots. Lock held. */
+static int ob_extend(void)
+{
+    uint32_t next = s_ob_next_needing_pool, i;
+    ob_slot *block = (ob_slot *)calloc(OB_HANDLES_PER_BLOCK, sizeof(ob_slot));
+    if (!block) return 0;
+    if ((next & (OB_ROOT_ADD_SPAN - 1u)) == 0) {
+        uint32_t used = next / OB_BLOCK_SPAN;
+        ob_slot **root = (ob_slot **)malloc((used + OB_BLOCKS_PER_ROOT_ADD) * sizeof(ob_slot *));
+        if (!root) { free(block); return 0; }
+        if (used) memcpy(root, s_ob_root, used * sizeof(ob_slot *));
+        free(s_ob_root);
+        s_ob_root = root;
+    }
+    s_ob_root[next / OB_BLOCK_SPAN] = block;
+    for (i = 0; i + 1u < OB_HANDLES_PER_BLOCK; i++)
+        block[i].next_free = next + (i + 1u) * 4u;
+    block[OB_HANDLES_PER_BLOCK - 1u].next_free = OB_NO_FREE_HANDLE;
+    s_ob_first_free = next ? next : block[0].next_free;  /* handle 0 stays unused */
+    s_ob_next_needing_pool = next + OB_BLOCK_SPAN;
+    return 1;
 }
 
-/* Store a native HANDLE into a 32-bit Xbox memory slot (as a token). */
-static void bridge_write_handle(uint32_t handle_va, HANDLE h)
+static ob_slot *ob_slot_of(uint32_t value)
 {
-    if (handle_va)
-        BRIDGE_MEM32(handle_va) = bridge_handle_token(h);
+    return &s_ob_root[value / OB_BLOCK_SPAN][(value % OB_BLOCK_SPAN) / 4u];
+}
+
+/* Give a native HANDLE a slot and return its handle value, 0 if out of memory. */
+static uint32_t bridge_handle_token(HANDLE h)
+{
+    uint32_t value = 0, count = 0;
+    if (!h || h == INVALID_HANDLE_VALUE) return 0;
+    ob_lock();
+    if (s_ob_first_free != OB_NO_FREE_HANDLE || ob_extend()) {
+        ob_slot *slot;
+        value = s_ob_first_free;
+        slot = ob_slot_of(value);
+        s_ob_first_free = slot->next_free;
+        slot->object = h;
+        count = ++s_ob_count;
+    }
+    ob_unlock();
+    if (!value)
+        fprintf(stderr, "  [BRIDGE] out of memory for a new handle\n");
+    else if (count >= 16384u && (count & (count - 1u)) == 0)
+        fprintf(stderr, "[HANDLES] %u open\n", count);
+    return value;
+}
+
+/* The native HANDLE behind a handle value; NULL if it isn't an open handle. */
+static HANDLE bridge_handle_lookup(uint32_t value)
+{
+    HANDLE h = NULL;
+    value &= ~3u;
+    ob_lock();
+    if (value < s_ob_next_needing_pool) h = ob_slot_of(value)->object;
+    ob_unlock();
+    return h;
+}
+
+static int bridge_handle_is_table(uint32_t value)
+{
+    int in_range;
+    ob_lock();
+    in_range = (value & ~3u) < s_ob_next_needing_pool;
+    ob_unlock();
+    return in_range;
+}
+
+/* Store a native HANDLE into a 32-bit Xbox memory slot. Out of memory closes
+ * the object and returns STATUS_INSUFFICIENT_RESOURCES, as ObInsertObject does. */
+static NTSTATUS bridge_write_handle(uint32_t handle_va, HANDLE h)
+{
+    uint32_t value;
+    if (!handle_va) return 0;
+    value = bridge_handle_token(h);
+    BRIDGE_MEM32(handle_va) = value;
+    if (!value && h && h != INVALID_HANDLE_VALUE) {
+        CloseHandle(h);
+        return (NTSTATUS)0xC000009Au;
+    }
+    return 0;
 }
 
 /* Resolve a 32-bit Xbox handle slot back to a native HANDLE. */
 static HANDLE bridge_read_handle(uint32_t va)
 {
     uint32_t token = BRIDGE_MEM32(va);
-    if ((token & 0xFF000000u) == BRIDGE_HANDLE_TAG) {
-        uint32_t i = token & BRIDGE_HANDLE_MASK;
-        return (i > 0 && i < BRIDGE_HANDLE_MAX) ? s_handle_table[i] : NULL;
-    }
-    /* Untagged value: synthetic/dummy handle -- pass through unchanged. */
+    if (bridge_handle_is_table(token))
+        return bridge_handle_lookup(token);
+    /* Above the table: synthetic/dummy handle -- pass through unchanged. */
     return (HANDLE)(uintptr_t)token;
 }
 
@@ -3071,10 +3176,8 @@ static HANDLE bridge_read_handle(uint32_t va)
  * which surfaced as "couldn't open or create saved game file". */
 static HANDLE bridge_resolve_handle(uint32_t token)
 {
-    if ((token & 0xFF000000u) == BRIDGE_HANDLE_TAG) {
-        uint32_t i = token & BRIDGE_HANDLE_MASK;
-        return (i > 0 && i < BRIDGE_HANDLE_MAX) ? s_handle_table[i] : NULL;
-    }
+    if (bridge_handle_is_table(token))
+        return bridge_handle_lookup(token);
     /* Pseudo-handles (NtCurrentProcess() = -1, NtCurrentThread() = -2) are
      * negative. Zero-extending them on a 64-bit host yields 0x00000000FFFFFFFE,
      * which Win32 rejects: X-Men Legends' CRT duplicates NtCurrentThread()
@@ -3109,12 +3212,9 @@ static uint32_t bridge_thread_object(uint32_t token)
                              GetCurrentProcess(), &h, 0, FALSE,
                              DUPLICATE_SAME_ACCESS))
             return 0;
-    } else if ((token & 0xFF000000u) == BRIDGE_HANDLE_TAG) {
-        uint32_t k = token & BRIDGE_HANDLE_MASK;
-        if (k == 0 || k >= BRIDGE_HANDLE_MAX) return 0;
-        h = s_handle_table[k];
     } else {
-        return 0;
+        h = bridge_handle_lookup(token);
+        if (!h) return 0;
     }
     tid = h ? GetThreadId(h) : 0;
     if (!tid) {
@@ -3194,15 +3294,21 @@ static void bridge_apply_priority(const char *fn, uint32_t obj, LONG inc)
 
 static HANDLE bridge_take_handle(uint32_t token)
 {
-    if ((token & 0xFF000000u) == BRIDGE_HANDLE_TAG) {
-        uint32_t i = token & BRIDGE_HANDLE_MASK;
-        if (i > 0 && i < BRIDGE_HANDLE_MAX) {
-            HANDLE h = s_handle_table[i];
-            s_handle_table[i] = NULL;
-            return h;
+    HANDLE h = NULL;
+    uint32_t value = token & ~3u;
+    ob_lock();
+    if (value < s_ob_next_needing_pool) {
+        ob_slot *slot = ob_slot_of(value);
+        h = slot->object;
+        if (h) {                /* last freed is the next one handed out */
+            slot->object = NULL;
+            slot->next_free = s_ob_first_free;
+            s_ob_first_free = value;
+            s_ob_count--;
         }
     }
-    return NULL;   /* untagged -> not a table handle, do not close */
+    ob_unlock();
+    return h;                   /* NULL: not an open handle */
 }
 
 /* Build a native OBJECT_ATTRIBUTES wrapping the translated Xbox path. */
@@ -3281,8 +3387,9 @@ static NTSTATUS bridge_create_file_impl(
     st = xbox_NtCreateFile(&h, access, &oa, &ios, NULL,
                            file_attrs, share, disposition, options);
 
+    if (NT_SUCCESS(st))
+        st = bridge_write_handle(handle_va, h);
     if (NT_SUCCESS(st)) {
-        bridge_write_handle(handle_va, h);
         bridge_write_iostatus(iostatus_va, ios.Status, (uint32_t)ios.Information);
     } else {
         bridge_write_iostatus(iostatus_va, st, 0);
@@ -4641,7 +4748,7 @@ static void bridge_NtCreateMutant(void)
     bridge_build_oa(STACK_ARG(1), &oa, &name);
     st = xbox_NtCreateMutant(&h, STACK_ARG(1) ? &oa : NULL,
                              (BOOLEAN)STACK_ARG(2));
-    if (st >= 0 && handle_va) bridge_write_handle(handle_va, h);
+    if (st >= 0 && handle_va) st = bridge_write_handle(handle_va, h);
     g_eax = (uint32_t)st;
 }
 
@@ -4861,7 +4968,7 @@ static void bridge_NtCreateSemaphore(void)
         &h, XBOX_TO_NATIVE(STACK_ARG(1)),
         (LONG)STACK_ARG(2), (LONG)STACK_ARG(3));
     if (st >= 0 && handle_va)
-        bridge_write_handle(handle_va, h);
+        st = bridge_write_handle(handle_va, h);
     g_eax = (uint32_t)st;
 }
 
@@ -5592,8 +5699,7 @@ static void bridge_NtDuplicateObject(void)
         g_eax = 0xC0000001u;   /* STATUS_UNSUCCESSFUL */
         return;
     }
-    bridge_write_handle(target_va, dup);
-    g_eax = 0;
+    g_eax = (uint32_t)bridge_write_handle(target_va, dup);
 }
 
 /* ── Dispatch table: ordinal → bridge function + stack arg bytes ── */
@@ -7983,9 +8089,7 @@ static void bridge_NtCreateTimer(void)
         g_eax = 0xC000009Au;  /* STATUS_INSUFFICIENT_RESOURCES */
         return;
     }
-    if (STACK_ARG(0))
-        bridge_write_handle(STACK_ARG(0), h);
-    g_eax = 0;  /* STATUS_SUCCESS */
+    g_eax = (uint32_t)bridge_write_handle(STACK_ARG(0), h);
 }
 
 /* --- NtOpenDirectoryObject (ordinal 201, 3 args = 12 bytes) --- */

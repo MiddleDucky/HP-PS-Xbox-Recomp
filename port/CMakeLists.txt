@@ -125,7 +125,7 @@ set(HPPS_RC_ICON "1 ICON \"${CMAKE_CURRENT_SOURCE_DIR}/res/app.ico\"\n")
 # empty without art: windres refuses a resource script with no resources
 # HPPS_VERSION: the release's version (tools/package_release.sh passes VERSION), in Properties > Details as the file
 # and product version; the description is the product's name, the copyright the port's author
-set(HPPS_VERSION "0.4.1" CACHE STRING "the release version, major.minor.patch")
+set(HPPS_VERSION "0.4.2" CACHE STRING "the release version, major.minor.patch")
 string(REGEX MATCHALL "[0-9]+" hpps_ver_parts "${HPPS_VERSION}.0.0.0")
 list(GET hpps_ver_parts 0 hpps_v0)
 list(GET hpps_ver_parts 1 hpps_v1)
