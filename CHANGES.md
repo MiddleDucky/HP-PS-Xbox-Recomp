@@ -1,23 +1,23 @@
 # Changes
 
-## v0.5.0 (2026-11-15), compared with v0.4.2
+## v0.5.0 (2026-11-15)
 
 ### New
-- **The NTSC-US disc, *Harry Potter and the Sorcerer's Stone*, plays too.** Put either disc's files in `game\`: the launcher sees which one it is, checks the files against that disc's list, shows its title and languages (English and Spanish on the US disc) and starts the matching game. Saves, settings and options are shared.
-- **Free camera** (F10 > Enhancements, on by default). Up and down on the right stick or the mouse now tilt the camera up and down around Harry, from below his head to high above him, as left and right already turn it. On the console they only moved the camera nearer and further in four steps; turn the option off to get that back. The tilt eases back by itself in cutscenes and scripted camera shots, and the game's camera collision still keeps it out of walls.
-- **PC Settings in the game's own menus**: a new first row in Options and a row under Save Game in the pause menu open the F10 pages (Display, Graphics, Post-processing, Audio, Controls, Accessibility, Enhancements) drawn in the game's font, so a controller can change them without F10. Key bindings, button remapping and Debug stay in F10.
-- **Keyboard prompts** (F10 > Controls > Button prompts). While you play with keyboard and mouse, the game's Xbox button pictures are drawn as the keys you bound, and its text names them: "Press 'Space' to continue". Automatic (the default) follows whichever device you used last.
-- **Skip the Warner Bros. and EA logos** (F10 > Enhancements, off by default).
-- **Resolution lists reach your screen's biggest mode** (launcher and F10), including 16:10 and ultrawide sizes, marked "(screen)"; internal resolution goes up to the screen's own height.
+- **The American disc works too.** *Harry Potter and the Sorcerer's Stone* (NTSC-US) now plays as well as the European *Philosopher's Stone*. Put either disc's files in the `game` folder and the launcher finds out which one it is. The American disc has English and Spanish.
+- **Free camera.** Move the right stick or the mouse up and down to look up and down. On the Xbox this only moved the camera closer or further away. It is on by default; turn it off under Enhancements to get the Xbox camera back.
+- **PC Settings inside the game.** The game's Options menu and pause menu have a new "PC Settings" row. It has the same settings as the launcher, so you can change them while you play, with a controller too.
+- **Keyboard buttons on screen.** When you play with keyboard and mouse, the game shows your keys instead of Xbox buttons, for example "Press 'Space' to continue". Change this under Controls > Button prompts.
+- **Skip the logo movies** at the start (under Enhancements, off by default).
+- **More resolutions**, up to your screen's own, including 16:10 and ultrawide screens.
 
 ### Changes
-- **New folder layout.** The launcher, `game\`, `saves\`, `licenses\` and the README stay at the top; the game itself (`hpps.exe` and one DLL per disc) goes in `bin\`, with your settings (`bin\hpps.toml`), the shader cache and the logs. Copy the new files over the old ones: the launcher moves an old `hpps.toml` and `shadercache\` into `bin\` the first time it starts, and the old `hpps.exe` at the top can be deleted.
-- **5.1 surround** now spreads the game's stereo over six speakers as a Pro Logic receiver does (the game is stereo on the console too), for analog 5.1 speakers. With a receiver that upmixes by itself, Stereo is enough.
-- "Cutscenes without black bars" is now under F10 > Enhancements.
-- The pupil standing in mid-air beside the cloisters corridor wall is no longer hidden.
+- **Tidier folder.** The port's own files, your settings and the logs are now in a `bin` folder. Next to the launcher there are only `game`, `saves`, `licenses` and the README. Unzip the new version over the old one: your settings move into `bin` by themselves. You can delete the old `hpps.exe` next to the launcher.
+- **Better 5.1 surround.** The game only has stereo sound, even on the Xbox. 5.1 now spreads it over all six speakers.
+- "Cutscene bars" is now under Enhancements.
+- The pupil floating in mid-air in the cloisters corridor is no longer hidden.
 
 ### Fixes
-- **No more long black screens before cutscenes** (issue #11; up to about three minutes before the flying lesson). The game's loading thread now runs at the priority it has on the console, so the cutscene's characters load at once.
+- **No more long black screens before cutscenes** (issue #11). Some cutscenes, like the flying lesson, could stay black for up to three minutes. They now start straight away.
 
 ## v0.4.2 (2026-11-05), hotfix
 
@@ -30,7 +30,7 @@
 - **Rooms no longer go black from the Mirror of Erised cutscene on** (issue #6). From that cutscene in the night after Diffindo, only Harry, Peeves and the eyes were drawn, and the room stayed black afterwards. The cause was the port's own fix that hides the pupil floating beside the cloisters corridor wall: it hid every mesh standing where she stood, and in that part of the game she is put away at the very spot all the room's meshes share. It now leaves that spot alone, and never hides more than one character's worth of meshes.
 
 ### Changes
-- **Field of view is 80 % by default** (F10 > Graphics). In 16:9 that keeps the camera's width close to the console's, which the game's camera relies on: with a wider view the camera could stick at one place while Harry moved on. F10 now says so under the slider. Settings saved before keep their value; F10's Defaults sets 80.
+- **Field of view is 80 % by default** (Graphics). In 16:9 that keeps the camera's width close to the console's, which the game's camera relies on: with a wider view the camera could stick at one place while Harry moved on. The setting now says so. Settings saved before keep their value; Defaults sets 80.
 
 ## v0.4.0 (2026-11-02), compared with v0.3.0
 
@@ -48,21 +48,20 @@
 
 ### Logs
 - **A log every run.** The launcher writes `logs\runs\hpps_run_<date_time>.log` and `xbox_kernel_<date_time>.log` each time, keeping the newest 10, so a problem always leaves a log. "Write debug logs" is now **Extra debug traces** and only adds detail.
-- **F10 > Debug:** "Open logs folder" and **"Mark this moment in the log"**, which writes a numbered mark with where Harry is and what he is doing. Press it right after something goes wrong and give the number with your report.
 - **Crash reports name the faulting module and thread**, and a long pause logs what the game was doing.
 
 ## v0.3.0 (2026-10-30), compared with v0.2.1
 
 ### New options
-- **Bloom and sharpening** (F10 > Graphics > Post-processing), both off by default.
-- **Field of view slider (experimental)** (F10 > Graphics), 80 to 130 % of the game's.
-- **Announce bean flavours on pickup** (F10 > Enhancements, on by default). Turn it off and the flavour is no longer said aloud when Harry picks up a bean.
+- **Bloom and sharpening** (Post-processing), both off by default.
+- **Field of view slider (experimental)** (Graphics), 80 to 130 % of the game's.
+- **Announce bean flavours on pickup** (Enhancements, on by default). Turn it off and the flavour is no longer said aloud when Harry picks up a bean.
 
 ### The launcher
 - **Checks your game files.** On the first start, after unpacking a disc image, and from "Verify game files", every file is compared with the disc's; damaged or missing ones are named, and "Repair" writes them again from a disc image in the game folder. Later starts only check the sizes.
 - **A new look:** the title in the Magic School One font over a Gryffindor scarlet backdrop, with no game artwork (the old main-menu picture is gone from every build); the exes have a wand icon in the same colours.
 - **No more crash under Wine** when a DXVK `dxgi.dll` sits beside the exes.
-- **`show_launcher` is the first setting in `hpps.toml`**, to bring the page back (or hold Shift, or F10).
+- **`show_launcher` is the first setting in `hpps.toml`**, to bring the page back (or hold Shift).
 
 ### Fixes
 - **A crash leaves `hpps_crash.log`** beside the game even with the debug logs off.
@@ -72,15 +71,15 @@
 
 ## v0.2.1 (2026-10-25), compared with v0.2.0
 
-- **F10's Defaults resets only the page you're on.** On Graphics it resets the graphics settings, on Controls the controls, and so on; the other pages keep your settings. Before, it reset every page at once. The aspect ratio is still kept, as before.
+- **Defaults resets only the page you're on.** On Graphics it resets the graphics settings, on Controls the controls, and so on; the other pages keep your settings. Before, it reset every page at once. The aspect ratio is still kept, as before.
 - **File properties:** both exes now show the product name, version, and copyright under Properties > Details.
 
 ## v0.2.0 (2026-10-25), compared with v0.1.0 (2026-10-20)
 
 ### New options
-- **5.1 surround sound** (F10 > Audio > Speakers). The console's own speaker mix is played with each channel on its own speaker, instead of folded down to stereo. It needs Windows' speaker setup set to 5.1, or a 5.1 HDMI receiver, and applies at the next start. Stereo is still the default and mixes exactly as before.
-- **Movement pace for the keyboard** (mouse wheel, or F10 > Controls > Movement keys): Sneak, Walk or Run, as in the Chamber of Secrets port. The movement keys always pushed the stick all the way, so Harry could only run, or sneak with the Caps Lock toggle. The wheel now steps the keys' pace down to Walk and Sneak and back up. The Sneak and Walk speeds can be set under F10 > Controls; the Caps Lock sneak toggle uses the Sneak speed too, and sneaks a little quicker than before. Run is the default, so nothing changes until you turn the wheel.
-- **Use controller** (launcher and F10 > Controls). Turn it off to play with keyboard and mouse while a controller is plugged in. The game then ignores the controller and doesn't make it vibrate.
+- **5.1 surround sound** (Audio > Speakers). The console's own speaker mix is played with each channel on its own speaker, instead of folded down to stereo. It needs Windows' speaker setup set to 5.1, or a 5.1 HDMI receiver, and applies at the next start. Stereo is still the default and mixes exactly as before.
+- **Movement pace for the keyboard** (mouse wheel, or Controls > Movement keys): Sneak, Walk or Run, as in the Chamber of Secrets port. The movement keys always pushed the stick all the way, so Harry could only run, or sneak with the Caps Lock toggle. The wheel now steps the keys' pace down to Walk and Sneak and back up. The Sneak and Walk speeds can be set under Controls; the Caps Lock sneak toggle uses the Sneak speed too, and sneaks a little quicker than before. Run is the default, so nothing changes until you turn the wheel.
+- **Use controller** (launcher, Controls). Turn it off to play with keyboard and mouse while a controller is plugged in. The game then ignores the controller and doesn't make it vibrate.
 
 ### Smoother play
 - **Shaders prepared ahead.** Every effect the game has drawn on your PC is recorded (`shadercache\pipelines_list.bin`). From the next start, it is all prepared in the background while you're in the menus ("Preparing shaders" shows in the corner). Areas you've visited before then load without the first-visit pause.
