@@ -482,11 +482,19 @@ static char s_mode_device[CCHDEVICENAME];
 static void fb_end_process(void)
 {
     fprintf(stderr, "[EXIT] game window closed (Alt+F4 / close button)\n");
+    xbox_EndProcess(0);
+}
+
+/* Every way the process ends goes through here: the window closing, and the title quitting to the dashboard
+ * (HalReturnToFirmware) or stopping on a bug check. ExitProcess hung on the title's own "Exit to Desktop" (CoS #28,
+ * PS #19) for the reason above: the frame stayed up and the process never went away. */
+void xbox_EndProcess(unsigned code)
+{
     fflush(stdout);
     fflush(stderr);
     if (s_mode_changed)
         ChangeDisplaySettingsExA(s_mode_device, NULL, NULL, 0, NULL);
-    TerminateProcess(GetCurrentProcess(), 0);
+    TerminateProcess(GetCurrentProcess(), code);
 }
 
 static void fb_display_from_env(void)

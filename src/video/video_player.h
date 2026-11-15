@@ -111,4 +111,8 @@ void xbox_FramebufferWindowSetDisplay(int mode, int w, int h);
 typedef int (*xbox_fb_msg_hook)(void *hwnd, unsigned msg, uintptr_t wp, intptr_t lp);
 void xbox_FramebufferWindowSetMsgHook(xbox_fb_msg_hook fn);
 
+/* Ends the process at once: the desktop's display mode back, logs flushed, then TerminateProcess. ExitProcess runs
+ * DLL teardown, which can hang in the GPU driver while the render thread is inside it. Never returns. */
+void xbox_EndProcess(unsigned code);
+
 #endif /* BURNOUT3_VIDEO_PLAYER_H */

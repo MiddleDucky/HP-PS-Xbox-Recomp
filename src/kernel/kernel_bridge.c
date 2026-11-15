@@ -1418,7 +1418,7 @@ static void bridge_HalReturnToFirmware(void)
     fflush(stderr);
 
     /* Write the indirect-branch targets before the process goes away. This
-     * path ends in ExitProcess, which does not run atexit handlers, so the
+     * path ends in TerminateProcess, which does not run atexit handlers, so the
      * host's registered dump never fires -- and a title that gives up during
      * boot is exactly the one whose targets are worth having. No-op unless
      * RECOMP_ICALL_FEEDBACK is on. */

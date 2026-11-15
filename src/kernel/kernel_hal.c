@@ -17,6 +17,9 @@
 #include <stdlib.h>
 #if defined(_WIN32)
 #include <intrin.h>
+
+/* video/fb_present.c: restores the display mode and ends the process without DLL teardown */
+void xbox_EndProcess(unsigned code);
 #endif
 #if defined(_MSC_VER) && !defined(__clang__)
 #pragma intrinsic(_ReturnAddress)
@@ -494,7 +497,7 @@ VOID __stdcall xbox_KeBugCheck(ULONG BugCheckCode)
     DebugBreak();
 #endif
 
-    ExitProcess(BugCheckCode);
+    xbox_EndProcess(BugCheckCode);
 }
 
 VOID __stdcall xbox_KeBugCheckEx(
@@ -513,7 +516,7 @@ VOID __stdcall xbox_KeBugCheckEx(
     DebugBreak();
 #endif
 
-    ExitProcess(BugCheckCode);
+    xbox_EndProcess(BugCheckCode);
 }
 
 /* ============================================================================
@@ -561,14 +564,14 @@ VOID __stdcall xbox_HalReturnToFirmware(ULONG Routine)
     /* stderr too: the kernel log file is rewritten on every run, so a title
      * that ends itself otherwise leaves no trace in the run's own log. */
     fprintf(stderr, "[EXIT] HalReturnToFirmware routine=%u\n", (unsigned)Routine);
-    ExitProcess(0);
+    xbox_EndProcess(0);
 }
 
 VOID __stdcall xbox_HalInitiateShutdown(void)
 {
     xbox_log(XBOX_LOG_INFO, XBOX_LOG_HAL, "HalInitiateShutdown (exiting)");
     fprintf(stderr, "[EXIT] HalInitiateShutdown\n");
-    ExitProcess(0);
+    xbox_EndProcess(0);
 }
 
 BOOLEAN __stdcall xbox_HalIsResetOrShutdownPending(void)
