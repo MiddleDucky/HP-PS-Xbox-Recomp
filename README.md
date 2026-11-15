@@ -1,4 +1,4 @@
-# Harry Potter and the Philosopher's Stone (PAL/NTSC) — Xbox to PC port
+# Harry Potter and the Philosopher's Stone (PAL/NTSC) — Xbox PC Recomp
 
 A native Windows port of the original Xbox game *Harry Potter and the Philosopher's Stone* (2003), the PAL disc, and its NTSC-US release *Harry Potter and the
 Sorcerer's Stone*, made by
