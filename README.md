@@ -1,4 +1,4 @@
-# Harry Potter and the Philosopher's Stone (PAL) — Xbox to PC port
+# Harry Potter and the Philosopher's Stone (PAL/NTSC) — Xbox to PC port
 
 A native Windows port of the original Xbox game *Harry Potter and the Philosopher's Stone* (2003), made by
 **static recompilation**: the game's x86 code is translated to C and compiled for Windows, with the Xbox kernel,
