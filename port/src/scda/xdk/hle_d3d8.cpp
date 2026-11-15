@@ -653,6 +653,14 @@ extern "C" void hpps_RequestCapture(void) { gpu::g_capture = true; }
 // xboxrecomp: the run is 16:9 (hle_video.c widens the 4:3 cameras)
 extern "C" int hpps_Widescreen(void) { return app::BootAspect() == app::AspectMode::Wide; }
 
+// xboxrecomp: how long the title means one of its frames to last (its presentation interval at the runtime's 59.94 Hz
+// vblank), or 0 while Pace() keeps it there (the fps setting is the game's own rate): hle_anim.c retimes per-frame
+// steps by it when the frame rate is 30 or unlocked
+extern "C" double hpps_TitleFrameSeconds(void) {
+    if (app::Get().fps_limit == 0) return 0.0;
+    return g_interval * 1001.0 / 60000.0;
+}
+
 // A movie frame went up (hle_video.c's UpdateOverlay). The NV2A scans the overlay out by itself, so a title playing
 // an XMV need not Swap; when it has not swapped lately, present the last frame for the overlay to be drawn over.
 extern "C" void hle_d3d8_overlay_present(void) {

@@ -121,6 +121,51 @@ void sub_000DDA80(void)
     sub_000DDA80_gen();
 }
 
+/*
+ * The Remembrall's fog (issue #16): sub_00036AF0 moves its 160 cloud sprites, each position (x, y at 0x32E97C,
+ * 8 bytes apart) by its velocity 0x500 further on, once per call and with no time step, wrapping at 640 x 480
+ * (sub_00036A10 draws them). Its drawing, sub_00045A30, calls it once a frame, so the clouds drifted as fast as frames
+ * came: twice as fast at 60 fps as at 30, and many times faster unlocked. That call (returning to 0x45A5E) moves them
+ * by the time the frame took instead, measured in the title's frames (hpps_TitleFrameSeconds): the velocities are
+ * scaled for the call and put back after. The set-up, sub_00040B40, pre-steps the clouds in a loop; those calls are
+ * steps, not frames, and stay as they are. At the game's own frame rate nothing changes.
+ */
+extern double hpps_TitleFrameSeconds(void); /* scda/xdk/hle_d3d8.cpp */
+
+#define FOG_COUNT 160
+#define FOG_VEL   0x0032EE7Cu  /* x, y per cloud */
+
+extern void sub_00036AF0_gen(void);
+void sub_00036AF0(void)
+{
+    static LARGE_INTEGER freq, last;
+    LARGE_INTEGER now;
+    double frame = hpps_TitleFrameSeconds(), dt, k;
+    float vel[FOG_COUNT * 2];
+
+    if (MEM32(g_esp) != 0x00045A5Eu) {
+        sub_00036AF0_gen();
+        return;
+    }
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    dt = last.QuadPart ? (double)(now.QuadPart - last.QuadPart) / (double)freq.QuadPart : 0.0;
+    last = now;
+    /* the game's own rate, or the Remembrall just opened (a long gap since the last frame of fog): one step */
+    if (frame <= 0.0 || dt <= 0.0 || dt > 0.25) {
+        sub_00036AF0_gen();
+        return;
+    }
+    k = dt / frame;
+    if (k > 4.0) k = 4.0;
+    for (int i = 0; i < FOG_COUNT * 2; i++) {
+        vel[i] = MEMF(FOG_VEL + 4 * i);
+        MEMF(FOG_VEL + 4 * i) = (float)(vel[i] * k);
+    }
+    sub_00036AF0_gen();
+    for (int i = 0; i < FOG_COUNT * 2; i++) MEMF(FOG_VEL + 4 * i) = vel[i];
+}
+
 extern void sub_000BA050_gen(void);
 void sub_000BA050(void)
 {
