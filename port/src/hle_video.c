@@ -209,10 +209,28 @@ int hpps_MenuMovie(void)
     return on && g_menu_movie;
 }
 
+/* F10 Enhancements, "Skip the Warner Bros. and EA logos": the boot sequence (sub_00023D50, a state machine) plays
+ * movies/splashwb.thp, then the language's movies/ea_<lang>.thp, each with 0x3253A4 set to 1 beforehand; the
+ * movie's callback clears it when a button skips the movie. Not playing them leaves it at 1, as a movie that ran
+ * to its end: the next state is the same. The player's return value is not read by those callers (cdecl, they pop
+ * the four arguments). Same names in the PAL and NTSC-US discs. */
+extern int hpps_SkipIntro(void);  /* scda/app/app.cpp */
+
+static int intro_logo(const char *n)
+{
+    return _stricmp(n, "movies/splashwb.thp") == 0 || _strnicmp(n, "movies/ea_", 10) == 0;
+}
+
 extern void sub_00164450_gen(void);
 void sub_00164450(void)
 {
     uint32_t name = ARG(0);
+    if (name && hpps_SkipIntro() && intro_logo((const char *)XBOX_PTR(name))) {
+        fprintf(stderr, "[XMV] skipped %s (skip_intro)\n", (const char *)XBOX_PTR(name));
+        g_eax = 0;
+        g_esp += 4;
+        return;
+    }
     int menu = name && _stricmp((const char *)XBOX_PTR(name), "movies/frontend.thp") == 0;
     if (menu) g_menu_movie = 1;
     sub_00164450_gen();

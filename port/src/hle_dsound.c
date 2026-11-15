@@ -430,10 +430,55 @@ static void render6(float *out, uint32_t frames)
     LeaveCriticalSection(&g_lock);
 }
 
+/* xboxrecomp: 5.1 output upmixes the front pair, Pro Logic style. On the console this title routes every voice to the
+ * front left / right bins only (read from the console's APU voice table, 2026-11-02: no 3D voices, no centre, back
+ * or LFE sends), so the 5.1 heard from a console is the receiver's Pro Logic decoding of that stereo; a PC's analog
+ * 5.1 has no receiver to do it. Here: the centre steered by how alike left and right are (a sound in both equally,
+ * as each of this title's mono effects is, goes to the centre; wide or uncorrelated stereo stays on the sides), the
+ * difference L - R to the back pair (10 ms later, under 7 kHz, opposite signs: the passive surround decode), the
+ * sum under 120 Hz to the LFE. What a title put on the other speakers itself is kept. RECOMP_UPMIX=0: off */
+static void upmix(float *out, uint32_t frames)
+{
+    enum { kDelay = MIX_RATE / 100 };
+    static float dl[kDelay], env_sum, env_dif, lp_s, lfe1, lfe2;
+    static uint32_t dpos;
+    static int on = -1;
+    const float a_env = 0.0007f;   /* ~30 ms */
+    const float a_s = 0.6f;        /* 7 kHz */
+    const float a_lfe = 0.0156f;   /* 120 Hz */
+    if (on < 0) {
+        const char *e = getenv("RECOMP_UPMIX");
+        on = !(e && *e == '0');
+        fprintf(stderr, "[DSOUND] 5.1 upmix of the front pair %s\n", on ? "on" : "off (RECOMP_UPMIX=0)");
+    }
+    if (!on) return;
+    for (uint32_t i = 0; i < frames; i++) {
+        float *o = out + i * 6, l = o[0], r = o[1];
+        float sum = 0.5f * (l + r), dif = 0.5f * (l - r), cg, s;
+        env_sum += a_env * (sum * sum - env_sum);
+        env_dif += a_env * (dif * dif - env_dif);
+        cg = 2.0f * env_sum / (env_sum + env_dif + 1e-12f) - 1.0f;  /* 0 uncorrelated or wide .. 1 the same in both */
+        cg = cg < 0.0f ? 0.0f : cg > 1.0f ? 1.0f : cg;
+        s = dl[dpos];
+        dl[dpos] = dif;
+        dpos = (dpos + 1) % kDelay;
+        lp_s += a_s * (s - lp_s);
+        lfe1 += a_lfe * (sum - lfe1);
+        lfe2 += a_lfe * (lfe1 - lfe2);
+        o[0] = l - cg * sum;  /* what went to the centre leaves the sides: the level stays the same */
+        o[1] = r - cg * sum;
+        o[2] += 1.4142f * cg * sum;
+        o[3] += 0.7f * lfe2;
+        o[4] += 0.7071f * lp_s;
+        o[5] -= 0.7071f * lp_s;
+    }
+}
+
 static void render(float *out, uint32_t frames)
 {
     if (g_oc == 6) {
         render6(out, frames);
+        upmix(out, frames);
         return;
     }
     memset(out, 0, frames * 2 * sizeof(float));

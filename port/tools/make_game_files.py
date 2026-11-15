@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""make_game_files.py - the launcher's list of the game's files (src/launcher/game_files.inc)
+"""make_game_files.py - the launcher's list of the game's files (src/launcher/game_files_pal.inc / _ntsc.inc)
 
-    tools/make_game_files.py <game folder> [src/launcher/game_files.inc] [--skip name ...]
+    tools/make_game_files.py <game folder> [src/launcher/game_files_<edition>.inc] [--skip name ...]
+
+With no output named, the list goes to the edition the folder's default.xbe is: PAL (code 1,570,580 bytes) or NTSC-US
+(1,570,612).
 
 Every file of a known-good PAL PS game folder as {path, size, CRC-32}: hpps_launcher.exe checks a player's game
 folder against it after unpacking and on its first start (src/launcher/gamefiles.c), so a damaged or missing file is
@@ -19,6 +22,18 @@ import zlib
 
 SKIP_NAMES = {"default_analysis.json"}
 SKIP_SUFFIXES = (".orig", ".part", ".bak", ".trainer-bak", ".iso", ".xiso")
+
+
+def edition(xbe):
+    """pal or ntsc, by the .text size (the two share title ID, size and sections)"""
+    import struct
+    d = open(xbe, "rb").read(0x10000)
+    base = struct.unpack_from("<I", d, 0x104)[0]
+    sh = struct.unpack_from("<I", d, 0x120)[0] - base
+    size = struct.unpack_from("<I", d, sh + 8)[0]
+    if size not in (1570580, 1570612):
+        sys.exit(f"{xbe}: neither the PAL nor the NTSC-US edition (.text {size} bytes): name the output")
+    return "pal" if size == 1570580 else "ntsc"
 
 
 def crc32(path):
@@ -39,10 +54,10 @@ def main():
     if not args:
         sys.exit(__doc__)
     root = args[0]
-    out = args[1] if len(args) > 1 else os.path.join(os.path.dirname(__file__), "..", "src", "launcher",
-                                                     "game_files.inc")
     if not os.path.isfile(os.path.join(root, "default.xbe")):
         sys.exit(f"{root} has no default.xbe: not a game folder")
+    out = args[1] if len(args) > 1 else os.path.join(os.path.dirname(__file__), "..", "src", "launcher",
+                                                     f"game_files_{edition(os.path.join(root, 'default.xbe'))}.inc")
     rows = []
     for d, dirs, files in os.walk(root):
         dirs.sort()

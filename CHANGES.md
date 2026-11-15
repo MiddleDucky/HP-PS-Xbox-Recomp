@@ -1,5 +1,24 @@
 # Changes
 
+## v0.5.0 (2026-11-15), compared with v0.4.2
+
+### New
+- **The NTSC-US disc, *Harry Potter and the Sorcerer's Stone*, plays too.** Put either disc's files in `game\`: the launcher sees which one it is, checks the files against that disc's list, shows its title and languages (English and Spanish on the US disc) and starts the matching game. Saves, settings and options are shared.
+- **Free camera** (F10 > Enhancements, on by default). Up and down on the right stick or the mouse now tilt the camera up and down around Harry, from below his head to high above him, as left and right already turn it. On the console they only moved the camera nearer and further in four steps; turn the option off to get that back. The tilt eases back by itself in cutscenes and scripted camera shots, and the game's camera collision still keeps it out of walls.
+- **PC Settings in the game's own menus**: a new first row in Options and a row under Save Game in the pause menu open the F10 pages (Display, Graphics, Post-processing, Audio, Controls, Accessibility, Enhancements) drawn in the game's font, so a controller can change them without F10. Key bindings, button remapping and Debug stay in F10.
+- **Keyboard prompts** (F10 > Controls > Button prompts). While you play with keyboard and mouse, the game's Xbox button pictures are drawn as the keys you bound, and its text names them: "Press 'Space' to continue". Automatic (the default) follows whichever device you used last.
+- **Skip the Warner Bros. and EA logos** (F10 > Enhancements, off by default).
+- **Resolution lists reach your screen's biggest mode** (launcher and F10), including 16:10 and ultrawide sizes, marked "(screen)"; internal resolution goes up to the screen's own height.
+
+### Changes
+- **New folder layout.** The launcher, `game\`, `saves\`, `licenses\` and the README stay at the top; the game itself (`hpps.exe` and one DLL per disc) goes in `bin\`, with your settings (`bin\hpps.toml`), the shader cache and the logs. Copy the new files over the old ones: the launcher moves an old `hpps.toml` and `shadercache\` into `bin\` the first time it starts, and the old `hpps.exe` at the top can be deleted.
+- **5.1 surround** now spreads the game's stereo over six speakers as a Pro Logic receiver does (the game is stereo on the console too), for analog 5.1 speakers. With a receiver that upmixes by itself, Stereo is enough.
+- "Cutscenes without black bars" is now under F10 > Enhancements.
+- The pupil standing in mid-air beside the cloisters corridor wall is no longer hidden.
+
+### Fixes
+- **No more long black screens before cutscenes** (issue #11; up to about three minutes before the flying lesson). The game's loading thread now runs at the priority it has on the console, so the cutscene's characters load at once.
+
 ## v0.4.2 (2026-11-05), hotfix
 
 ### Fixes

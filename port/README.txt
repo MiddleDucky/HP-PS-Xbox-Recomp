@@ -25,36 +25,42 @@ INSTALLING
 
 1. Put the port's files in a folder of your choice:
        hpps_launcher.exe
-       hpps.exe
+       bin\            the game itself (hpps.exe, hpps_pal.dll, hpps_ntsc.dll,
+                       shadercache\base_shaders.bin)
        README.txt
        licenses\
-       shadercache\base_shaders.bin
-2. Copy the game files from your disc or the .xiso file into a folder named "game" in the same folder with the executables.
+2. Copy the game files from your disc or the .xiso file into a folder named "game" beside hpps_launcher.exe.
+   Either disc works: the PAL "Philosopher's Stone" or the NTSC-US
+   "Sorcerer's Stone"; the launcher sees which one is there.
    The launcher then checks every game file against the disc's once (a few
    seconds, longer on a hard drive) and names any that are damaged or
    missing; "Verify game files" on its page checks them again.
 
-Updating from an earlier version: replace the files above and keep your
-hpps.toml, saves\ and shadercache\ (your settings, saved games and the
-shaders already built on your PC stay as they are).
+Updating from an earlier version: copy the files above over the old ones and
+keep your saves\. A hpps.toml and shadercache\ from before bin\ are moved
+into bin\ by the launcher the first time it starts (your settings and the
+shaders already built on your PC stay as they are); the old hpps.exe beside
+the launcher is no longer used and can be deleted.
 
 The port creates these itself on the first run:
-    hpps.toml      your settings (the launcher and F10 change them)
-    saves\         your saved games
-    shadercache\   shaders built on your PC (the first visit to an area
-                   prepares them; later visits load at once)
+    saves\             your saved games (beside the launcher)
+    bin\hpps.toml      your settings (the launcher and F10 change them)
+    bin\shadercache\   shaders built on your PC (the first visit to an area
+                       prepares them; later visits load at once)
+    bin\logs\          the run logs
 
 
 PLAYING
 -------
 
-Start the game with hpps_launcher.exe. Opening hpps.exe directly only offers
-to open the launcher.
+Start the game with hpps_launcher.exe. Opening bin\hpps.exe directly only
+offers to open the launcher.
 
 The launcher sets the aspect ratio (4:3 or 16:9), display, graphics,
 controls and the language, then starts the game with Play. Language: the
 game starts in English, French, German, Spanish, Italian, Dutch or Swedish,
-the seven the disc has speech for (the game's own menu can still change it). If you turn its page off, the
+the seven the PAL disc has speech for, or English or Spanish on the US disc
+(the game's own menu can still change it). If you turn its page off, the
 launcher starts the game straight away; hold Shift while opening it to see
 the page again.
 
@@ -62,6 +68,9 @@ Only one copy of the game runs at a time: starting it again brings the
 running game to the front.
 
 Quitting: "Quit To Desktop" in the main menu or the pause menu, or Alt+F4.
+
+"PC Settings", the first row of the game's Options and a row in the pause
+menu, opens the F10 pages below in the game's own menu, for a controller.
 
 Keys that always work
   F10          Options (see below)
@@ -100,7 +109,7 @@ OPTIONS (F10)
 -------------
 
 F10 opens the options over the game; most changes apply at once and are saved
-to hpps.toml. "Defaults (this page)" resets the page you are on (Graphics,
+to bin\hpps.toml. "Defaults (this page)" resets the page you are on (Graphics,
 Controls, ...) and leaves the others; the aspect ratio stays. "Show the
 launcher at startup" turns the launcher's page on or off.
 
@@ -170,10 +179,13 @@ Controls
                          "Default buttons" restores them
 
 Audio
-  Speakers               Stereo, or 5.1 surround: the console's own speaker
-                         mix, each channel to its own speaker. Needs Windows'
-                         speaker setup set to 5.1 (or a 5.1 HDMI receiver).
-                         Applies at the next start.
+  Speakers               Stereo, or 5.1 surround. The game is stereo on the
+                         console too; 5.1 spreads it over six speakers as a
+                         Pro Logic receiver does (centre, back pair, LFE), for
+                         analog 5.1 speakers. Needs Windows' speaker setup set
+                         to 5.1. With a receiver that upmixes by itself
+                         (S/PDIF, HDMI), Stereo is enough. Applies at the next
+                         start.
 
 Accessibility
   Colour blindness
@@ -187,13 +199,23 @@ Enhancements
     Announce bean flavours on pickup
                          off: the flavour is no longer said aloud when Harry
                          picks up a bean (on by default)
+  Camera
+    Free camera          up and down on the right stick or the mouse tilt the
+                         camera up and down around Harry (on by default); off:
+                         they move it nearer and further, as on the console
+  Cutscenes
+    Cutscenes without black bars
+                         16:9: cutscenes fill the screen; off: the console's
+                         bars over the picture
+  Startup
+    Skip the Warner Bros. and EA logos   off by default
 
 Debug
   Logs                   every start from the launcher writes a log to
-                         logs\runs (hpps_run_<date_time>.log, with the
+                         bin\logs\runs (hpps_run_<date_time>.log, with the
                          kernel's xbox_kernel_<date_time>.log beside it); the
                          newest 10 runs are kept. Send both with a report.
-    Open logs folder     opens logs\runs
+    Open logs folder     opens bin\logs\runs
     Mark this moment in the log
                          writes a numbered [MARK] line with where Harry is
                          and what he is doing: press it right after something
@@ -212,12 +234,12 @@ The launcher says game files are damaged or missing
 
 "Failed to load default.xbe"
     The game files are missing: check that game\default.xbe exists beside
-    hpps.exe.
+    hpps_launcher.exe.
 
 The game will not start / closes at once
     Update your graphics driver (DirectX 12 is required). If it still fails,
     send the newest hpps_run_<date_time>.log and xbox_kernel_<date_time>.log
-    from logs\runs beside the game.
+    from bin\logs\runs.
 
 A short pause the first time you enter an area
     Shaders are being prepared for your graphics card; the loading picture

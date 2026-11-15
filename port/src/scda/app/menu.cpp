@@ -8,6 +8,7 @@
 #endif
 #include <cstring>
 #include <windows.h>
+#include "edition.h"
 #include <shellapi.h>
 
 #include <algorithm>
@@ -40,10 +41,6 @@ constexpr uint32_t kAnisoValues[] = {0, 2, 4, 8, 16};
 const char* const kAnisoNames[] = {"Game's", "2x", "4x", "8x", "16x"};
 constexpr uint32_t kMsaaValues[] = {0, 2, 4, 8};
 const char* const kMsaaNames[] = {"Off", "2x", "4x", "8x"};
-// internal resolution: render lines, 0 follows the window
-constexpr uint32_t kInternalValues[] = {0, 480, 720, 960, 1080, 1440, 1920, 2160};
-const char* const kInternalNames[] = {"Follow window",  "480 (Xbox, 1x)", "720 (1.5x)", "960 (2x)",
-                                      "1080 (2.25x)",   "1440 (3x)",      "1920 (4x)",  "2160 (4.5x, 4K)"};
 const char* const kDisplayNames[] = {"Windowed", "Borderless", "Fullscreen"};
 const char* const kAspectNames[] = {"4:3", "16:9", "Stretch"};
 
@@ -53,6 +50,54 @@ int IndexOf(const uint32_t (&values)[N], uint32_t v) {
         if (values[i] == v) return int(i);
     }
     return 0;
+}
+
+// the monitor's biggest size. EnumDisplaySettings lists the real modes; GetSystemMetrics is scaled by Windows' DPI
+// setting for a program that is not DPI-aware (a 4K screen at 150% reads 2560 x 1440 there), so it only stands in
+std::pair<uint32_t, uint32_t> ScreenMax() {
+    static const std::pair<uint32_t, uint32_t> max = [] {
+        uint32_t w = GetSystemMetrics(SM_CXSCREEN), h = GetSystemMetrics(SM_CYSCREEN);
+        DEVMODEA dm{};
+        dm.dmSize = sizeof(dm);
+        auto take = [&] {
+            if (uint64_t(dm.dmPelsWidth) * dm.dmPelsHeight > uint64_t(w) * h) {
+                w = dm.dmPelsWidth;
+                h = dm.dmPelsHeight;
+            }
+        };
+        for (DWORD i = 0; EnumDisplaySettingsA(nullptr, i, &dm); i++) take();
+        if (EnumDisplaySettingsA(nullptr, ENUM_CURRENT_SETTINGS, &dm)) take();
+        return std::pair<uint32_t, uint32_t>{w, h};
+    }();
+    return max;
+}
+
+// internal resolution: the lines the 3D is drawn at, 0 follows the window. Steps of the Xbox's 480 up to the screen's
+// height, and that height itself; a saved value off the list (set in the toml) stays on it
+struct InternalChoice {
+    uint32_t lines;
+    std::string name;
+};
+
+std::vector<InternalChoice> InternalChoices(uint32_t screen_h, uint32_t cur) {
+    static const uint32_t kSteps[] = {480, 720, 960, 1080, 1440, 1920, 2160, 2880, 3240, 3840, 4320};
+    std::vector<uint32_t> v;
+    for (uint32_t l : kSteps)
+        if (l <= screen_h) v.push_back(l);
+    if (screen_h >= 480) v.push_back(screen_h);
+    if (cur) v.push_back(cur);
+    std::sort(v.begin(), v.end());
+    v.erase(std::unique(v.begin(), v.end()), v.end());
+    std::vector<InternalChoice> out{{0, "Follow window"}};
+    for (uint32_t l : v) {
+        uint32_t x = (l * 100 + 240) / 480;  // the scale over the Xbox's lines, in hundredths
+        std::string scale = std::to_string(x / 100);
+        if (x % 100) scale += "." + std::to_string(x % 100 / 10) + (x % 10 ? std::to_string(x % 10) : "");
+        std::string name = std::to_string(l) + " (" + (l == 480 ? "Xbox, " : "") + scale + "x";
+        if (l == screen_h) name += ", screen";
+        out.push_back({l, name + ")"});
+    }
+    return out;
 }
 
 // the primary monitor's modes, biggest first, each size once
@@ -81,19 +126,31 @@ bool Shaped(uint32_t w, uint32_t h, AspectMode a) {
     return r > want - 0.02f && r < want + 0.02f;
 }
 
+// the biggest size of a shape inside w x h, even on both sides (a 3440 x 1440 screen holds 2560 x 1440 at 16:9)
+std::pair<uint32_t, uint32_t> FitShape(uint32_t w, uint32_t h, AspectMode a) {
+    if (a == AspectMode::Stretch) return {w, h};
+    uint32_t rw = a == AspectMode::Wide ? 16 : 4, rh = a == AspectMode::Wide ? 9 : 3, k = std::min(w / rw, h / rh) & ~1u;
+    return {k * rw, k * rh};
+}
+
+// up to the screen's biggest mode (ScreenMax): the screen's own size on top when it has another shape, the picture
+// keeping its shape in it
 std::vector<std::pair<uint32_t, uint32_t>> ModesFor(AspectMode a) {
     static const std::pair<uint32_t, uint32_t> kCommon[] = {
         {640, 480},   {800, 600},   {1024, 768},  {1280, 960},  {1440, 1080}, {1600, 1200}, {1920, 1440},
         {2048, 1536}, {2880, 2160}, {1280, 720},  {1600, 900},  {1920, 1080}, {2560, 1440}, {3200, 1800},
-        {3840, 2160}};
-    uint32_t dw = GetSystemMetrics(SM_CXSCREEN), dh = GetSystemMetrics(SM_CYSCREEN);
+        {3840, 2160}, {5120, 2880}, {7680, 4320}, {3840, 2880}, {5760, 4320}};
+    auto [sw, sh] = ScreenMax();
     std::vector<std::pair<uint32_t, uint32_t>> m;
     for (auto [w, h] : Modes())
-        if (Shaped(w, h, a)) m.emplace_back(w, h);
+        if (Shaped(w, h, a) && w <= sw && h <= sh) m.emplace_back(w, h);
+    auto fit = FitShape(sw, sh, a);
+    if (fit.first >= 640) m.push_back(fit);
     for (auto [w, h] : kCommon)
-        if (Shaped(w, h, a) && w <= dw && h <= dh) m.emplace_back(w, h);
+        if (Shaped(w, h, a) && w <= sw && h <= sh) m.emplace_back(w, h);
     std::sort(m.begin(), m.end(), [](auto x, auto y) { return x.first * x.second > y.first * y.second; });
     m.erase(std::unique(m.begin(), m.end()), m.end());
+    if (!Shaped(sw, sh, a)) m.insert(m.begin(), {sw, sh});
     return m;
 }
 
@@ -123,6 +180,14 @@ void DrawControls(Settings& s) {
     }
     Row("Keyboard and mouse");
     if (ImGui::Checkbox("Keyboard and mouse play as controller 1", &s.kbm)) Changed();
+    // xboxrecomp: the HUD's, the inventory's and the menus' button pictures as the bound keys (d3d12.cpp)
+    static const char* const kPromptNames[] = {"Automatic", "Controller buttons", "Keyboard keys"};
+    int bp = int(std::min(s.button_prompts, 2u));
+    if (Combo("Button prompts", &bp, kPromptNames, 3)) {
+        s.button_prompts = uint32_t(bp);
+        Changed();
+    }
+    ImGui::TextDisabled("Automatic switches as soon as you use the other device.");
     int ms = int(s.mouse_sensitivity);
     if (ImGui::SliderInt("Mouse sensitivity", &ms, 1, 100)) s.mouse_sensitivity = uint32_t(ms);
     if (ImGui::IsItemDeactivatedAfterEdit()) Changed();
@@ -229,7 +294,6 @@ static void ResetPage(Settings& s, const char* page) {
         std::memcpy(&s.bloom_strength, &d.bloom_strength, sizeof(s.bloom_strength));
         std::memcpy(&s.sharpen, &d.sharpen, sizeof(s.sharpen));
         std::memcpy(&s.contrast, &d.contrast, sizeof(s.contrast));
-        std::memcpy(&s.cutscene_bars, &d.cutscene_bars, sizeof(s.cutscene_bars));
         std::memcpy(&s.display_mode, &d.display_mode, sizeof(s.display_mode));
         std::memcpy(&s.fps_counter, &d.fps_counter, sizeof(s.fps_counter));
         std::memcpy(&s.fov, &d.fov, sizeof(s.fov));
@@ -253,6 +317,7 @@ static void ResetPage(Settings& s, const char* page) {
         std::memcpy(&s.invert_x, &d.invert_x, sizeof(s.invert_x));
         std::memcpy(&s.invert_y, &d.invert_y, sizeof(s.invert_y));
         std::memcpy(&s.kbm, &d.kbm, sizeof(s.kbm));
+        std::memcpy(&s.button_prompts, &d.button_prompts, sizeof(s.button_prompts));
         std::memcpy(&s.keys, &d.keys, sizeof(s.keys));
         std::memcpy(&s.mouse_invert_y, &d.mouse_invert_y, sizeof(s.mouse_invert_y));
         std::memcpy(&s.mouse_sensitivity, &d.mouse_sensitivity, sizeof(s.mouse_sensitivity));
@@ -271,7 +336,10 @@ static void ResetPage(Settings& s, const char* page) {
         std::memcpy(&s.colorblind_strength, &d.colorblind_strength, sizeof(s.colorblind_strength));
     }
     if (!std::strcmp(page, "Enhancements")) {
+        std::memcpy(&s.cutscene_bars, &d.cutscene_bars, sizeof(s.cutscene_bars));
         std::memcpy(&s.bean_names, &d.bean_names, sizeof(s.bean_names));
+        std::memcpy(&s.free_camera, &d.free_camera, sizeof(s.free_camera));
+        std::memcpy(&s.skip_intro, &d.skip_intro, sizeof(s.skip_intro));
     }
     if (!std::strcmp(page, "Debug")) {
         std::memcpy(&s.debug_logs, &d.debug_logs, sizeof(s.debug_logs));
@@ -286,7 +354,9 @@ void DrawPanel(bool start) {
                             ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(520 * io.FontGlobalScale, 0), ImGuiCond_Appearing);
     bool open = true;
-    const char* title = start ? "Harry Potter and the Philosopher's Stone - Settings###start" : "Options (F10)";
+    // the edition in the title (hpps_pal.dll / hpps_ntsc.dll); ### keeps the window's id whatever it says
+    const char* title = start ? HPPS_GAME_TITLE " (" HPPS_EDITION_NAME ") - Settings###start"
+                              : "Options (F10) - " HPPS_GAME_TITLE ", " HPPS_EDITION_NAME "###options";
     if (!ImGui::Begin(title, start ? nullptr : &open, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::End();
         if (!open) g_open = false;
@@ -298,6 +368,12 @@ void DrawPanel(bool start) {
     static const char* page = "Graphics";  // the open page, for Defaults
     if (tabs && ImGui::BeginTabItem("Graphics")) {
         page = "Graphics";
+    // xboxrecomp: the launcher's page before the game, on a tab as well as in the bar below (2026-11-15: a player who
+    // had turned it off found no way back but holding Shift)
+    Row("Startup");
+    if (ImGui::Checkbox("Show the launcher at startup##graphics", &s.show_launcher)) Changed();
+    ImGui::SameLine();
+    ImGui::TextDisabled("its settings page before the game starts (or hold Shift as the launcher starts)");
     Row("Display");
     // the aspect ratio first: the sizes below follow it
     int asp = int(s.aspect);
@@ -316,7 +392,6 @@ void DrawPanel(bool start) {
     }
     if (!start && s.aspect != BootAspect())
         ImGui::TextDisabled("Aspect ratio applies at the next start.");
-    if (s.aspect == AspectMode::Wide && ImGui::Checkbox("Cutscene bars", &s.cutscene_bars)) Changed();
     int dm = int(s.display_mode);
     if (Combo("Display mode", &dm, kDisplayNames, 3)) {
         s.display_mode = DisplayMode(dm);
@@ -332,6 +407,7 @@ void DrawPanel(bool start) {
             }
             for (auto [w, h] : modes) {
                 std::string name = std::to_string(w) + " x " + std::to_string(h);
+                if (std::pair{w, h} == ScreenMax()) name += "  (screen)";
                 if (ImGui::Selectable(name.c_str(), w == s.width && h == s.height)) {
                     s.width = w;
                     s.height = h;
@@ -354,10 +430,19 @@ void DrawPanel(bool start) {
         ImGui::TextDisabled("Runs the game faster than the Xbox did; some timing may misbehave. Vsync caps it at the monitor.");
 
     Row("Resolution");
-    int ir = IndexOf(kInternalValues, s.internal_height);
-    if (Combo("Internal resolution", &ir, kInternalNames, int(std::size(kInternalNames)))) {
-        s.internal_height = kInternalValues[ir];
-        Changed();
+    {
+        auto choices = InternalChoices(ScreenMax().second, s.internal_height);
+        const InternalChoice* cur = &choices.front();
+        for (const auto& c : choices)
+            if (c.lines == s.internal_height) cur = &c;
+        if (ImGui::BeginCombo("Internal resolution", cur->name.c_str())) {
+            for (const auto& c : choices)
+                if (ImGui::Selectable(c.name.c_str(), &c == cur)) {
+                    s.internal_height = c.lines;
+                    Changed();
+                }
+            ImGui::EndCombo();
+        }
     }
     if (!s.internal_height) {
         int pct = int(s.render_percent);
@@ -412,7 +497,8 @@ void DrawPanel(bool start) {
     if (tabs && ImGui::BeginTabItem("Audio")) {
         page = "Audio";
         Row("Output");
-        // xboxrecomp: the console mixes to 5.1 (Dolby Digital out of the console); stereo folds it down
+        // xboxrecomp: the game is stereo on the console (front left / right only); 5.1 upmixes it as a Pro Logic
+        // receiver does (hle_dsound.c upmix), for analog 5.1 speakers with no receiver in between
         int sp = s.speakers == 6 ? 1 : 0;
         const char* const kSpeakerNames[] = {"Stereo", "5.1 surround"};
         if (Combo("Speakers", &sp, kSpeakerNames, 2)) {
@@ -420,7 +506,9 @@ void DrawPanel(bool start) {
             Changed();
         }
         ImGui::TextDisabled("Takes effect the next time the game starts.");
-        ImGui::TextDisabled("5.1 needs Windows' speaker setup set to 5.1 (or a 5.1 HDMI receiver).");
+        ImGui::TextDisabled("The game is stereo on the console too: 5.1 spreads it over six speakers");
+        ImGui::TextDisabled("as a Pro Logic receiver does. Needs Windows' speaker setup set to 5.1.");
+        ImGui::TextDisabled("With a receiver that upmixes by itself (S/PDIF, HDMI), Stereo is enough.");
         ImGui::EndTabItem();
     }
     if (tabs && ImGui::BeginTabItem("Controls")) {
@@ -452,6 +540,20 @@ void DrawPanel(bool start) {
         Row("Bertie Bott's beans");
         if (ImGui::Checkbox("Announce bean flavours on pickup", &s.bean_names)) Changed();
         ImGui::TextDisabled("Off: the flavour is no longer said aloud when Harry picks up a bean.");
+        Row("Camera");
+        if (ImGui::Checkbox("Free camera", &s.free_camera)) Changed();
+        ImGui::TextDisabled("The right stick's or mouse's up and down tilt the camera up and down round Harry.");
+        ImGui::TextDisabled("Off: they move the camera nearer and further, as on the console.");
+        // xboxrecomp: moved from Graphics (2026-11-10), worded as the PoA and CoS ports' (the setting is still
+        // cutscene_bars, true keeping the bars, so hpps.toml reads as before)
+        Row("Cutscenes");
+        bool no_bars = !s.cutscene_bars;
+        if (ImGui::Checkbox("Cutscenes without black bars", &no_bars)) s.cutscene_bars = !no_bars, Changed();
+        ImGui::TextDisabled("In 16:9 cutscenes fill the screen with no bars at the top and bottom (subtitles over the");
+        ImGui::TextDisabled("picture). Off: the console's bars over the picture.");
+        Row("Startup");
+        if (ImGui::Checkbox("Skip the Warner Bros. and EA logos", &s.skip_intro)) Changed();
+        ImGui::TextDisabled("The logo movies before the title screen are not played. Off: played, as on the console.");
         ImGui::EndTabItem();
     }
     // xboxrecomp: the Debug tab, as CoS has it: where this run's log is (the launcher writes one per run, always), a
@@ -566,6 +668,227 @@ int MsgHook(void* hwnd, unsigned msg, uintptr_t wp, intptr_t lp) {
     }
 }
 
+// ── xboxrecomp: the F10 settings as rows of the game's own menus (hle_frontend.c: Options and the pause menu's
+// "PC Settings", after HP:CoS's) ──────────────────────────────────────────────────────────────────────────────────
+//
+// Pages of rows, each a label and a value as words; left and right step the value (A steps it on), with the same
+// limits and the same saving (Changed) as the panel's own controls. Key bindings, the button remapping and the Debug
+// tab stay in F10. The game draws them in its menu font, so the words keep to letters, digits and ": . -" (no '%',
+// brackets or '*' shown); a label ending in '*' is a setting for the next start, which the menu says under the rows.
+
+std::string LinesName(uint32_t lines) {
+    if (!lines) return "Match window";
+    if (lines == 480) return "Original 480p";
+    if (lines == 2160) return "4K 2160p";
+    return std::to_string(lines) + "p";
+}
+
+struct GameRow {
+    const char* label;
+    std::string (*value)(const Settings&);
+    void (*step)(Settings&, int dir);  // dir -1 or +1; changes the settings only
+    bool display = false;  // applies to the window (ApplyDisplay)
+    bool held = false;     // the window's size and shape: chosen here, applied as the page is left (app_GameOptLeave)
+};
+
+std::string OnOff(bool b) { return b ? "On" : "Off"; }
+
+uint32_t Stepped(uint32_t v, int dir, uint32_t lo, uint32_t hi, uint32_t by) {
+    int64_t n = int64_t(v) + int64_t(dir) * by;
+    return uint32_t(std::clamp<int64_t>(n, lo, hi));
+}
+
+int Cycled(int i, int dir, int n) { return ((i + dir) % n + n) % n; }
+
+std::string Num(uint32_t v, const char* off = nullptr) { return v == 0 && off ? off : std::to_string(v); }
+
+// the next of a list of values from v (a value off the list goes to its neighbour that way)
+uint32_t NextOf(const uint32_t* list, size_t n, uint32_t v, int dir) {
+    if (dir > 0) {
+        for (size_t i = 0; i < n; i++)
+            if (list[i] > v) return list[i];
+        return list[n - 1];
+    }
+    for (size_t i = n; i-- > 0;)
+        if (list[i] < v) return list[i];
+    return list[0];
+}
+
+const GameRow kDisplayRows[] = {
+    {"Aspect ratio *", [](const Settings& s) { return std::string(kAspectNames[std::min(uint32_t(s.aspect), 2u)]); },
+     [](Settings& s, int d) {
+         s.aspect = AspectMode(Cycled(int(s.aspect), d, 3));
+         if (s.width && s.height && !Shaped(s.width, s.height, s.aspect)) {
+             auto m = ModesFor(s.aspect);
+             if (!m.empty()) s.width = m.front().first, s.height = m.front().second;
+         }
+     },
+     true, true},
+    {"Display mode", [](const Settings& s) { return std::string(kDisplayNames[std::min(uint32_t(s.display_mode), 2u)]); },
+     [](Settings& s, int d) { s.display_mode = DisplayMode(Cycled(int(s.display_mode), d, 3)); }, true},
+    {"Resolution",
+     [](const Settings& s) {
+         return s.width && s.height ? std::to_string(s.width) + " x " + std::to_string(s.height) : std::string("Desktop");
+     },
+     [](Settings& s, int d) {
+         // Desktop, then the shape's sizes biggest first
+         auto m = ModesFor(s.aspect);
+         int cur = 0;
+         for (size_t i = 0; i < m.size(); i++)
+             if (m[i].first == s.width && m[i].second == s.height) cur = int(i) + 1;
+         int n = Cycled(cur, d, int(m.size()) + 1);
+         if (n == 0) s.width = s.height = 0;
+         else s.width = m[n - 1].first, s.height = m[n - 1].second;
+     },
+     true, true},
+    {"Vsync", [](const Settings& s) { return OnOff(s.vsync); }, [](Settings& s, int) { s.vsync = !s.vsync; }},
+    {"Frame rate",
+     [](const Settings& s) {
+         return std::string(s.fps_limit == 30 ? "30 fps" : s.fps_limit == kFpsUnlocked ? "Unlocked" : "60 fps");
+     },
+     [](Settings& s, int d) {
+         int i = s.fps_limit == 30 ? 1 : s.fps_limit == kFpsUnlocked ? 2 : 0;
+         i = Cycled(i, d, 3);
+         s.fps_limit = i == 1 ? 30 : i == 2 ? kFpsUnlocked : 0;
+     }},
+};
+
+const GameRow kGraphicsRows[] = {
+    {"Internal resolution", [](const Settings& s) { return LinesName(s.internal_height); },
+     [](Settings& s, int d) {
+         auto c = InternalChoices(ScreenMax().second, s.internal_height);
+         int cur = 0;
+         for (size_t i = 0; i < c.size(); i++)
+             if (c[i].lines == s.internal_height) cur = int(i);
+         s.internal_height = c[size_t(std::clamp(cur + d, 0, int(c.size()) - 1))].lines;
+     }},
+    {"Render scale", [](const Settings& s) { return std::to_string(s.render_percent); },
+     [](Settings& s, int d) { s.render_percent = Stepped(s.render_percent, d, 25, 200, 25); }},
+    {"Max render height",
+     [](const Settings& s) { return s.render_max_height ? std::to_string(s.render_max_height) + "p" : std::string("No limit"); },
+     [](Settings& s, int d) {
+         // 0 (no limit) last: up from 4320 lifts the limit, down from it comes back to 4320
+         static const uint32_t k[] = {480, 720, 960, 1080, 1440, 2160, 2880, 4320, 0xFFFFFFFFu};
+         uint32_t v = s.render_max_height ? s.render_max_height : 0xFFFFFFFFu;
+         v = NextOf(k, std::size(k), v, d);
+         s.render_max_height = v == 0xFFFFFFFFu ? 0 : v;
+     }},
+    {"MSAA", [](const Settings& s) { return std::string(kMsaaNames[IndexOf(kMsaaValues, s.msaa)]); },
+     [](Settings& s, int d) {
+         s.msaa = kMsaaValues[std::clamp(IndexOf(kMsaaValues, s.msaa) + d, 0, int(std::size(kMsaaValues)) - 1)];
+     }},
+    {"SMAA", [](const Settings& s) { return OnOff(s.smaa); }, [](Settings& s, int) { s.smaa = !s.smaa; }},
+    {"Anisotropic filter", [](const Settings& s) { return std::string(kAnisoNames[IndexOf(kAnisoValues, s.aniso)]); },
+     [](Settings& s, int d) {
+         s.aniso = kAnisoValues[std::clamp(IndexOf(kAnisoValues, s.aniso) + d, 0, int(std::size(kAnisoValues)) - 1)];
+     }},
+    {"Brightness", [](const Settings& s) { return std::to_string(s.brightness); },
+     [](Settings& s, int d) { s.brightness = Stepped(s.brightness, d, 0, 100, 5); }},
+    {"Contrast", [](const Settings& s) { return std::to_string(s.contrast); },
+     [](Settings& s, int d) { s.contrast = Stepped(s.contrast, d, 0, 100, 5); }},
+    {"Field of view",
+     [](const Settings& s) {
+         uint32_t f = std::clamp(s.fov, 80u, 130u);
+         return f == 100 ? std::string("Game") : std::to_string(f);
+     },
+     [](Settings& s, int d) { s.fov = Stepped(std::clamp(s.fov, 80u, 130u), d, 80, 130, 5); }},
+    {"FPS counter", [](const Settings& s) { return OnOff(s.fps_counter); },
+     [](Settings& s, int) { s.fps_counter = !s.fps_counter; }},
+};
+
+const GameRow kPostRows[] = {
+    {"Bloom", [](const Settings& s) { return OnOff(s.bloom); }, [](Settings& s, int) { s.bloom = !s.bloom; }},
+    {"Bloom strength", [](const Settings& s) { return std::to_string(s.bloom_strength); },
+     [](Settings& s, int d) { s.bloom_strength = Stepped(s.bloom_strength, d, 0, 100, 5); }},
+    {"Sharpening", [](const Settings& s) { return Num(s.sharpen, "Off"); },
+     [](Settings& s, int d) { s.sharpen = Stepped(s.sharpen, d, 0, 100, 5); }},
+};
+
+const GameRow kAudioRows[] = {
+    {"Speakers *", [](const Settings& s) { return std::string(s.speakers == 6 ? "5.1 surround" : "Stereo"); },
+     [](Settings& s, int) { s.speakers = s.speakers == 6 ? 2 : 6; }},
+};
+
+const GameRow kControlsRows[] = {
+    {"Keyboard and mouse", [](const Settings& s) { return OnOff(s.kbm); }, [](Settings& s, int) { s.kbm = !s.kbm; }},
+    {"Button prompts",
+     [](const Settings& s) {
+         static const char* const k[] = {"Automatic", "Controller", "Keyboard"};
+         return std::string(k[std::min(s.button_prompts, 2u)]);
+     },
+     [](Settings& s, int d) { s.button_prompts = uint32_t(Cycled(int(std::min(s.button_prompts, 2u)), d, 3)); }},
+    {"Mouse sensitivity", [](const Settings& s) { return std::to_string(s.mouse_sensitivity); },
+     [](Settings& s, int d) { s.mouse_sensitivity = Stepped(s.mouse_sensitivity, d, 1, 100, 1); }},
+    {"Invert mouse Y", [](const Settings& s) { return OnOff(s.mouse_invert_y); },
+     [](Settings& s, int) { s.mouse_invert_y = !s.mouse_invert_y; }},
+    {"Movement keys",
+     [](const Settings& s) { return std::string(kMoveModeNames[std::min<uint32_t>(s.move_mode, kMoveModes - 1)]); },
+     [](Settings& s, int d) {
+         s.move_mode = uint32_t(Cycled(int(std::min<uint32_t>(s.move_mode, kMoveModes - 1)), d, int(kMoveModes)));
+     }},
+    {"Sneak speed", [](const Settings& s) { return std::to_string(s.pace_sneak); },
+     [](Settings& s, int d) { s.pace_sneak = Stepped(s.pace_sneak, d, 5, 100, 1); }},
+    {"Walk speed", [](const Settings& s) { return std::to_string(s.pace_walk); },
+     [](Settings& s, int d) { s.pace_walk = Stepped(s.pace_walk, d, 5, 100, 1); }},
+    {"Use controller", [](const Settings& s) { return OnOff(s.controller); },
+     [](Settings& s, int) { s.controller = !s.controller; }},
+    {"Left deadzone", [](const Settings& s) { return std::to_string(s.deadzone_left); },
+     [](Settings& s, int d) { s.deadzone_left = Stepped(s.deadzone_left, d, 0, 50, 1); }},
+    {"Left sensitivity", [](const Settings& s) { return std::to_string(s.sensitivity_left); },
+     [](Settings& s, int d) { s.sensitivity_left = Stepped(s.sensitivity_left, d, 25, 200, 5); }},
+    {"Right deadzone", [](const Settings& s) { return std::to_string(s.deadzone_right); },
+     [](Settings& s, int d) { s.deadzone_right = Stepped(s.deadzone_right, d, 0, 50, 1); }},
+    {"Right sensitivity", [](const Settings& s) { return std::to_string(s.sensitivity_right); },
+     [](Settings& s, int d) { s.sensitivity_right = Stepped(s.sensitivity_right, d, 25, 200, 5); }},
+    {"Invert camera X", [](const Settings& s) { return OnOff(s.invert_x); },
+     [](Settings& s, int) { s.invert_x = !s.invert_x; }},
+    {"Invert camera Y", [](const Settings& s) { return OnOff(s.invert_y); },
+     [](Settings& s, int) { s.invert_y = !s.invert_y; }},
+    {"Vibration", [](const Settings& s) { return OnOff(s.vibration); },
+     [](Settings& s, int) { s.vibration = !s.vibration; }},
+    {"Vibration strength", [](const Settings& s) { return std::to_string(s.vibration_strength); },
+     [](Settings& s, int d) { s.vibration_strength = Stepped(s.vibration_strength, d, 0, 100, 5); }},
+};
+
+const GameRow kAccessRows[] = {
+    {"Colour filter",
+     [](const Settings& s) {
+         static const char* const k[] = {"Off", "Protanopia", "Deuteranopia", "Tritanopia"};
+         return std::string(k[std::min(s.colorblind, 3u)]);
+     },
+     [](Settings& s, int d) { s.colorblind = uint32_t(Cycled(int(std::min(s.colorblind, 3u)), d, 4)); }},
+    {"Filter strength", [](const Settings& s) { return std::to_string(s.colorblind_strength); },
+     [](Settings& s, int d) { s.colorblind_strength = Stepped(s.colorblind_strength, d, 0, 100, 5); }},
+};
+
+const GameRow kEnhanceRows[] = {
+    {"Bean flavours", [](const Settings& s) { return OnOff(s.bean_names); },
+     [](Settings& s, int) { s.bean_names = !s.bean_names; }},
+    {"Free camera", [](const Settings& s) { return OnOff(s.free_camera); },
+     [](Settings& s, int) { s.free_camera = !s.free_camera; }},
+    {"Cutscene bars", [](const Settings& s) { return std::string(s.cutscene_bars ? "Shown" : "Hidden"); },
+     [](Settings& s, int) { s.cutscene_bars = !s.cutscene_bars; }},
+    {"Skip logo movies", [](const Settings& s) { return OnOff(s.skip_intro); },
+     [](Settings& s, int) { s.skip_intro = !s.skip_intro; }},
+};
+
+struct GamePage {
+    const char* name;
+    const GameRow* rows;
+    int n;
+};
+
+#define GAME_PAGE(name, rows) {name, rows, int(std::size(rows))}
+const GamePage kGamePages[] = {
+    GAME_PAGE("Display", kDisplayRows),        GAME_PAGE("Graphics", kGraphicsRows),
+    GAME_PAGE("Post-processing", kPostRows),   GAME_PAGE("Audio", kAudioRows),
+    GAME_PAGE("Controls", kControlsRows),      GAME_PAGE("Accessibility", kAccessRows),
+    GAME_PAGE("Enhancements", kEnhanceRows),
+};
+#undef GAME_PAGE
+
+const GamePage* PageAt(int p) { return p >= 0 && p < int(std::size(kGamePages)) ? &kGamePages[p] : nullptr; }
+
 }  // namespace
 
 bool MenuOpen() { return g_open || g_start; }
@@ -625,3 +948,61 @@ void DrawUi() {
 
 // hle_input.c: the panel has the controller while it is open
 extern "C" int hpps_MenuOpen(void) { return app::MenuOpen(); }
+
+// hle_frontend.c: PC Settings's pages. Page -1 is the list of pages; its rows are the pages' names, no values.
+// The strings stay good until the next call on this thread (the game thread asks for one row at a time)
+extern "C" int app_GameOptRows(int page) {
+    if (page < 0) return int(std::size(app::kGamePages));
+    const app::GamePage* p = app::PageAt(page);
+    return p ? p->n : 0;
+}
+
+extern "C" const char* app_GameOptLabel(int page, int row) {
+    if (page < 0) return app::PageAt(row) ? app::kGamePages[row].name : "";
+    const app::GamePage* p = app::PageAt(page);
+    return p && row >= 0 && row < p->n ? p->rows[row].label : "";
+}
+
+// the size rows' choice (aspect, width, height) waits here until the page is left: a resolution change switches the
+// screen's mode or resizes the window, which each step would otherwise do
+namespace {
+app::Settings g_pend;
+int g_pend_page = -1;
+}  // namespace
+
+extern "C" const char* app_GameOptValue(int page, int row) {
+    static thread_local std::string v;
+    const app::GamePage* p = app::PageAt(page);
+    if (!p || row < 0 || row >= p->n) return "";
+    std::lock_guard lock(app::UiLock());
+    const app::GameRow& r = p->rows[row];
+    v = r.value(r.held && g_pend_page == page ? g_pend : app::Get());
+    return v.c_str();
+}
+
+extern "C" void app_GameOptStep(int page, int row, int dir) {
+    const app::GamePage* p = app::PageAt(page);
+    if (!p || row < 0 || row >= p->n) return;
+    std::lock_guard lock(app::UiLock());
+    const app::GameRow& r = p->rows[row];
+    if (r.held) {
+        if (g_pend_page != page) g_pend = app::Get(), g_pend_page = page;
+        r.step(g_pend, dir < 0 ? -1 : 1);
+        return;
+    }
+    r.step(app::Get(), dir < 0 ? -1 : 1);
+    app::Changed(r.display);
+}
+
+// a page left (B, the menu closed): its size choice applied
+extern "C" void app_GameOptLeave(int page) {
+    std::lock_guard lock(app::UiLock());
+    if (g_pend_page != page) return;
+    g_pend_page = -1;
+    app::Settings& s = app::Get();
+    if (s.aspect == g_pend.aspect && s.width == g_pend.width && s.height == g_pend.height) return;
+    s.aspect = g_pend.aspect;
+    s.width = g_pend.width;
+    s.height = g_pend.height;
+    app::Changed(true);
+}

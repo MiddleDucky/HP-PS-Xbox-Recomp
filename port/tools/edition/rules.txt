@@ -1,0 +1,37 @@
+# pal2ntsc.py rules: the PAL -> NTSC-US literals the function map cannot decide (pal2ntsc.py translate --rules).
+# The build runs the translation with --strict: a literal it can't place stops the build until it is added here.
+#
+#   keep 0xV         left as it is in the NTSC copy (not an address, or the same in both editions)
+#   map  0xPAL 0xNTSC
+#
+# Found 2026-11-11 by masked-context search (spot search over the two .text sections) and checked in the disassembly.
+
+# .text's start: the same VA in both
+keep 0x11000
+keep 0x11005
+# D3D render-state / format constants and sizes in hle_d3d8.cpp, not addresses
+keep 0x40000
+keep 0x50000
+keep 0x70000
+keep 0x80000
+keep 0xD0001
+# recomp_manual.c's commented-out example
+keep 0x12345
+# icall seed inside a function the disassembler bounds wrongly (sub_00080077); same address in NTSC
+keep 0x800E0
+
+# the stick deadzone constant and its test (hle_input.c comment): shift 0 and -0x20 in their functions
+keep 0x19050
+map 0x62885 0x62865
+# the bean pickup and the message call's return address (hle_trainer.c): sub_00041E44/78 differ in a rel8, so the
+# function match fails; NTSC 0x41E76 calls 0x4F690 (PAL sub_0004F6B0) and returns to 0x41E7B
+map 0x41E52 0x41E42
+map 0x41E8B 0x41E7B
+# the troll impact callers (hle_anim.c comment), in sub_000BB555
+map 0xBCDF3 0xBCDE3
+map 0xBD161 0xBD151
+# the end of the door state machine sub_000D86D0 (its end, 0xD925C, is padded to 0xD9260; NTSC -0x10)
+map 0xD9260 0xD9250
+# XapiInitProcess's call of the disc authentication, and the jge NTSC already has as jmp (sub_0015542B -> 0x154ECB)
+map 0x155482 0x154F22
+map 0x155489 0x154F29

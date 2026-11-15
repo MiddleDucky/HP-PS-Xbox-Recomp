@@ -258,10 +258,13 @@ NTSTATUS __stdcall xbox_ExQueryNonVolatileSetting(
         break;
 
     case XC_AUDIO:
-        /* Stereo PCM matches the two-channel host output. 1 means mono;
-         * advertising AC3 requires an encoded-output path. */
+        /* Stereo PCM (0) matches two-channel host output. xboxrecomp: RECOMP_SPEAKERS=6 (a launcher's 5.1 option,
+         * its mixer opening six channels) reports the dashboard's surround with Dolby Digital (XC_AUDIO_FLAGS_SURROUND
+         * 0x2 | ENABLE_AC3 0x10000), so a title and its DSound library route to all six speakers as on a console on
+         * a 5.1 receiver; nothing is AC3-encoded here, the mixer hands the six channels to the host as PCM */
         if (ValueLength >= sizeof(ULONG)) {
-            *(PULONG)Value = 0x00000000;
+            const char *sp = getenv("RECOMP_SPEAKERS");
+            *(PULONG)Value = sp && atoi(sp) == 6 ? 0x00010002 : 0x00000000;
             if (Type) *Type = 4; /* REG_DWORD */
             if (ResultLength) *ResultLength = sizeof(ULONG);
         }

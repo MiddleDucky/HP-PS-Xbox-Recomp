@@ -5,6 +5,7 @@
 // panel, and re-read while the game runs when it changes on disk. A RECOMP_*
 // variable in the environment at launch overrides its line for that run
 // (debug.env beside the exe, debugging) and is not written back.
+#include "edition.h"
 #include "app/app.h"
 
 #include <windows.h>
@@ -68,6 +69,8 @@ const Entry kEntries[] = {
     {"vsync", "RECOMP_VSYNC", Kind::Bool, FIELD(vsync), 0, 0, nullptr},
     {"fps_counter", nullptr, Kind::Bool, FIELD(fps_counter), 0, 0, nullptr},
     {"fov", "RECOMP_FOV", Kind::U32, FIELD(fov), 80, 130, "field of view, % of the game's"},
+    {"skip_intro", "RECOMP_SKIP_INTRO", Kind::Bool, FIELD(skip_intro), 0, 0,
+     "the Warner Bros. and EA logo movies at start skipped; false: played, as the console does"},
     {"cutscene_bars", nullptr, Kind::Bool, FIELD(cutscene_bars), 0, 0,
      "16:9: cutscenes fill the screen and keep the console's black bars over the picture (subtitles in the bottom one)"},
     {"debug_logs", "RECOMP_DEBUG_LOGS", Kind::Bool, FIELD(debug_logs), 0, 0,
@@ -82,9 +85,10 @@ const Entry kEntries[] = {
     {"fps_limit", "RECOMP_FPS_LIMIT", Kind::Fps, FIELD(fps_limit), 0, 0,
      "frame rate: 0 the game's own (59.94), 30 caps it at 30 fps, 'unlocked' as fast as vsync / the PC allow (experimental: the game was made for 60)"},
     {"language", "RECOMP_LANGUAGE", Kind::Language, FIELD(language), 0, 0,
-     "the language the game starts in: 'english', 'french', 'german', 'spanish', 'italian', 'dutch' or 'swedish'; takes a restart"},
+     "the language the game starts in: 'english', 'french', 'german', 'spanish', 'italian', 'dutch' or 'swedish' "
+     "(the NTSC-US disc: 'english' or 'spanish'); takes a restart"},
     {"speakers", "RECOMP_SPEAKERS", Kind::U32, FIELD(speakers), 2, 6,
-     "2 stereo, 6 5.1 surround (the console's speaker mix, each channel to its own speaker); takes a restart"},
+     "2 stereo, 6 5.1 surround (the game's stereo upmixed as a Pro Logic receiver does; RECOMP_UPMIX=0 turns that off); takes a restart"},
     {"colorblind", nullptr, Kind::ColorBlind, FIELD(colorblind), 0, 0,
      "colour-blind correction over the finished frame: 'off', 'protanopia', 'deuteranopia' or 'tritanopia'"},
     {"colorblind_strength", nullptr, Kind::U32, FIELD(colorblind_strength), 0, 100, "0 to 100 %"},
@@ -93,8 +97,13 @@ const Entry kEntries[] = {
     {"sharpen", "RECOMP_SHARPEN", Kind::U32, FIELD(sharpen), 0, 100, "0 (off) to 100: contrast adaptive sharpening"},
     {"bean_names", "RECOMP_BEAN_NAMES", Kind::Bool, FIELD(bean_names), 0, 0,
      "a bean's flavour said aloud as Harry picks it up, as the game does; false: not spoken"},
+    {"free_camera", "RECOMP_FREE_CAMERA", Kind::Bool, FIELD(free_camera), 0, 0,
+     "the camera stick's (and the mouse's) up and down tilt the camera up and down round Harry; false: they move it "
+     "nearer and further, as the console does"},
     {"keyboard_mouse", nullptr, Kind::Bool, FIELD(kbm), 0, 0,
      "keyboard and mouse play as controller 1, alongside a pad (key names below; Mouse1-5 the mouse buttons)"},
+    {"button_prompts", nullptr, Kind::U32, FIELD(button_prompts), 0, 2,
+     "the game's button pictures: 0 follow the device used last, 1 controller buttons, 2 the bound keys"},
     {"mouse_sensitivity", nullptr, Kind::U32, FIELD(mouse_sensitivity), 1, 100, "1 to 100, the camera's speed with the mouse"},
     {"move_mode", nullptr, Kind::U32, FIELD(move_mode), 0, 2,
      "the movement keys' pace: 0 sneak, 1 walk, 2 run; the mouse wheel steps it"},
@@ -162,8 +171,13 @@ constexpr const char* kDisplayNames[] = {"windowed", "borderless", "fullscreen"}
 constexpr const char* kAspectNames[] = {"4:3", "16:9", "stretch"};
 constexpr const char* kColorBlindNames[] = {"off", "protanopia", "deuteranopia", "tritanopia"};
 // the languages this disc carries speech for (the main menu's flag list, hle_frontend.c's sub_0002A790)
+#if HPPS_NTSC
+constexpr const char* kLanguageNames[] = {"english", "spanish"};  // the NTSC-US disc's two
+constexpr uint32_t kLanguages = 2;
+#else
 constexpr const char* kLanguageNames[] = {"english", "french", "german", "spanish", "italian", "dutch", "swedish"};
 constexpr uint32_t kLanguages = 7;
+#endif
 
 uint32_t& U(Settings& s, const Entry& e) { return *reinterpret_cast<uint32_t*>(reinterpret_cast<char*>(&s) + e.off); }
 bool& B(Settings& s, const Entry& e) { return *reinterpret_cast<bool*>(reinterpret_cast<char*>(&s) + e.off); }
@@ -288,7 +302,7 @@ bool ReadFile(Settings& s) {
 
 void WriteFile(Settings& s) {
     std::ostringstream o;
-    o << "# Harry Potter and the Philosopher's Stone (xboxrecomp) settings, as SCDA's scda.toml.\n"
+    o << "# " HPPS_GAME_TITLE " (xboxrecomp) settings, as SCDA's scda.toml.\n"
          "# F10 in game changes them too. Saved while the game runs, this file applies at once,\n"
          "# except aspect. A RECOMP_* environment variable of the same setting wins over its line.\n";
     for (const Entry& e : kEntries) {
@@ -491,6 +505,8 @@ std::recursive_mutex& UiLock() {
 
 // hle_dsound.c, when the mixer starts: output channels
 extern "C" int hpps_BeanNames(void) { return app::Get().bean_names; }
+extern "C" int hpps_FreeCamera(void) { return app::Get().free_camera; }  // hle_camera.c, the camera stick
+extern "C" int hpps_SkipIntro(void) { return app::Get().skip_intro; }  // hle_video.c, the movie player
 extern "C" uint32_t hpps_FovPercent(void) { return std::clamp<uint32_t>(app::Get().fov, 80, 130); }
 extern "C" int app_Speakers(void) { return app::Get().speakers == 6 ? 6 : 2; }
 

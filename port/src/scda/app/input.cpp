@@ -238,6 +238,24 @@ void InputMessage(void* hwnd, unsigned msg, uintptr_t wp, intptr_t lp) {
 static std::atomic<bool> g_pad0{true};
 static bool KbmActive() { return Get().kbm || !g_pad0.load(std::memory_order_relaxed); }
 
+// xboxrecomp: Button prompts (F10 Controls). Automatic follows the device played with last: a key, mouse button or
+// mouse move against a controller button or a stick pushed past half (app_InputPad); before either, keys when no
+// controller answers on port 0. d3d12.cpp draws the game's button pictures as the bound keys while this says so
+static std::atomic<int> g_device{-1};  // 1 keyboard and mouse, 0 controller, -1 not yet
+
+bool PromptsKbmNow() {
+    const Settings& s = Get();
+    if (s.button_prompts == 1) return false;
+    if (s.button_prompts == 2) return true;
+    const int d = g_device.load(std::memory_order_relaxed);
+    return d < 0 ? !g_pad0.load(std::memory_order_relaxed) : d == 1;
+}
+
+static void NoteDevice(bool kbm) {
+    if (g_device.exchange(kbm ? 1 : 0) != (kbm ? 1 : 0))
+        std::fprintf(stderr, "[PROMPTS] playing with the %s\n", kbm ? "keyboard and mouse" : "controller");
+}
+
 void InputFrame() {
     // the pointer held in the game window while keyboard and mouse play, the window has the focus and no panel is up
     HWND w = static_cast<HWND>(Window());
@@ -328,7 +346,15 @@ extern "C" void app_InputPad(int port, XBOX_GAMEPAD* g) {
     }
     app::Shape(&g->sThumbLX, &g->sThumbLY, s.deadzone_left, s.sensitivity_left);
     app::Shape(&g->sThumbRX, &g->sThumbRY, s.deadzone_right, s.sensitivity_right);
+    // Button prompts' Automatic: which device this read came from (the controller's before the keys go on top)
+    bool pad_used = false, kbm_used = false;
+    if (port == 0) {
+        for (uint32_t i = 0; i < app::kPadInputs; i++) pad_used |= in[i] > 64;
+        pad_used |= std::abs(int(g->sThumbLX)) > 16000 || std::abs(int(g->sThumbLY)) > 16000 ||
+                    std::abs(int(g->sThumbRX)) > 16000 || std::abs(int(g->sThumbRY)) > 16000;
+    }
     if (port == 0 && app::KbmActive() && GetForegroundWindow() == static_cast<HWND>(app::Window()) && !app::MenuOpen()) {
+        for (uint32_t i = 0; i < app::kKeyBinds; i++) kbm_used |= s.keys[i] && app::Held(s.keys[i]);
         for (uint32_t i = 0; i < app::kPadInputs; i++)
             if (app::Held(s.keys[i])) out[i] = 255;
         float lx = float(app::Held(s.keys[19])) - float(app::Held(s.keys[18]));
@@ -341,6 +367,7 @@ extern "C" void app_InputPad(int port, XBOX_GAMEPAD* g) {
         }
         float rx, ry;
         app::MouseStick(s, &rx, &ry);
+        kbm_used |= std::fabs(rx) > 0.2f || std::fabs(ry) > 0.2f;
         rx += float(app::Held(s.keys[23])) - float(app::Held(s.keys[22]));
         ry += float(app::Held(s.keys[20])) - float(app::Held(s.keys[21]));
         if (rx || ry) {
@@ -350,6 +377,7 @@ extern "C" void app_InputPad(int port, XBOX_GAMEPAD* g) {
             g->sThumbRY = app::Clamp16(ry);
         }
     }
+    if (pad_used != kbm_used) app::NoteDevice(kbm_used);
     if (s.invert_x) g->sThumbRX = int16_t(std::max(-32767, -int(g->sThumbRX)));
     if (s.invert_y) g->sThumbRY = int16_t(std::max(-32767, -int(g->sThumbRY)));
     if (port == 0) {
@@ -363,6 +391,25 @@ extern "C" void app_InputPad(int port, XBOX_GAMEPAD* g) {
 
 // hle_input.c: keyboard and mouse play as controller 1 (port 0 is there with no controller plugged in)
 extern "C" int app_KbmOn(void) { return app::KbmActive(); }
+
+// d3d12.cpp: the button pictures as keys now, and the key bound to a pad input (kPadInputNames' order), 0 unbound
+extern "C" int app_PromptsKbm(void) { return app::PromptsKbmNow(); }
+extern "C" uint32_t app_PadInputKey(int pad_input) {
+    return pad_input >= 0 && pad_input < int(app::kPadInputs) ? app::Get().keys[pad_input] : 0;
+}
+// hle_frontend.c: the key bound to a pad input as the game's text names it ("Space", "E", "Left Click"), "" unbound
+extern "C" const char* app_ButtonKeyLabel(int pad_input) {
+    const uint32_t vk = app_PadInputKey(pad_input);
+    switch (vk) {
+        case 0: return "";
+        case 0x01: return "Left Click";
+        case 0x02: return "Right Click";
+        case 0x04: return "Middle Click";
+        case 0x05: return "Mouse 4";
+        case 0x06: return "Mouse 5";
+        default: return app::KeyName(vk);
+    }
+}
 // hle_input.c, after each read of port 0: whether a controller answered
 extern "C" void app_InputPad0Present(int present) { app::g_pad0.store(present != 0, std::memory_order_relaxed); }
 

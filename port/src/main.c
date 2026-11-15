@@ -1,5 +1,5 @@
 /**
- * hpps (Harry Potter and the Philosopher's Stone) - Recompiled Game Entry Point
+ * hpps (Harry Potter and the Philosopher's Stone, PAL / the Sorcerer's Stone, NTSC-US: edition.h) - Recompiled Game Entry Point
  *
  * This is the Windows executable that hosts the recompiled game code.
  * It performs the following initialization sequence:
@@ -42,6 +42,7 @@
 #include <xbox/xboxrecomp.h>
 #include <xbox/host_unwind.h>
 #include "single_instance.h"
+#include "build_info.h" /* generated in the build folder: HPPS_GIT, HPPS_BUILT */
 
 /*
  * If xboxrecomp.h is not an umbrella header in your setup, include
@@ -486,7 +487,9 @@ static DWORD WINAPI stall_thread(LPVOID unused)
     QueryPerformanceFrequency(&freq);
     HANDLE game = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION, FALSE, g_stall_tid);
     if (!game) return 0;
-    const DWORD64 exe = (DWORD64)(uintptr_t)GetModuleHandleA(NULL);
+    /* the game's own module: this DLL, not hpps.exe */
+    extern IMAGE_DOS_HEADER __ImageBase;
+    const DWORD64 exe = (DWORD64)(uintptr_t)&__ImageBase;
     unsigned stalls = 0, samples = 0;
     int64_t in_stall = 0;  /* the Swap the current stall waits after, 0 when none */
     int second_pass = 0;
@@ -766,8 +769,13 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
  * Header-only changes (a region-free patch) keep these and pass. */
 static int xbe_is_expected_edition(const uint8_t *x, size_t n)
 {
+    /* NTSC-US shares the title ID, file size and sections; its .text is 32 bytes longer (the entry is translated) */
     const uint32_t want_tid = 0x45410037u, want_entry = 0x00154331u, want_sections = 13u;
-    const uint32_t want_text_va = 0x00011000u, want_text_size = 1570580u;
+#if HPPS_NTSC
+    const uint32_t want_text_va = 0x00011000u, want_text_size = 1570612u, other_text_size = 1570580u;
+#else
+    const uint32_t want_text_va = 0x00011000u, want_text_size = 1570580u, other_text_size = 1570612u;
+#endif
     uint32_t tid = 0, entry = 0, sections = 0, text_va = 0, text_size = 0;
 #define XBE32(o) (*(const uint32_t *)(x + (o)))
     if (n >= 0x180 && XBE32(0) == 0x48454258u) {  /* "XBEH" */
@@ -785,13 +793,21 @@ static int xbe_is_expected_edition(const uint8_t *x, size_t n)
     printf("XBE edition mismatch: title ID %08X entry %08X, %u sections, code %08X %u bytes, %zu bytes in all; "
            "expected title ID %08X entry %08X, %u sections, code %08X %u bytes (3264512 bytes)\n",
            tid, entry, sections, text_va, text_size, n, want_tid, want_entry, want_sections, want_text_va, want_text_size);
-    char msg[640];
-    snprintf(msg, sizeof msg,
-             "This recompile is made from the PAL (Europe) release of Harry Potter and the Philosopher's Stone.\n\n"
-             "The default.xbe in the 'game' folder is a different edition (title ID %08X, %zu bytes, %u sections),\n"
-             "whose code does not match, so it cannot run.\n\n"
-             "Please use the PAL (Europe) release (default.xbe: title ID %08X, 3264512 bytes).",
-             tid, n, sections, want_tid);
+    char msg[768];
+    if (tid == want_tid && sections == want_sections && text_size == other_text_size)
+        snprintf(msg, sizeof msg,
+                 "This is " HPPS_GAME_TITLE " for the " HPPS_EDITION_NAME " release, but the default.xbe in the 'game'\n"
+                 "folder is from the %s release.\n\n"
+                 "Start the game with hpps_launcher.exe: it tells the two apart and starts the right one.",
+                 HPPS_NTSC ? "PAL (Europe)" : "NTSC-US");
+    else
+        snprintf(msg, sizeof msg,
+                 "This recompile is made from the " HPPS_EDITION_NAME " release of " HPPS_GAME_TITLE ".\n\n"
+                 "The default.xbe in the 'game' folder is a different edition (title ID %08X, %zu bytes, %u sections,\n"
+                 "code %u bytes), whose code does not match, so it cannot run.\n\n"
+                 "Please use the PAL (Europe) Philosopher's Stone or the NTSC-US Sorcerer's Stone\n"
+                 "(default.xbe: title ID %08X, 3264512 bytes).",
+                 tid, n, sections, text_size, want_tid);
     MessageBoxA(NULL, msg, "Unsupported game version", MB_ICONERROR);
     return 0;
 }
@@ -850,6 +866,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         }
     }
 
+    /* The console's thread priorities (RECOMP_GUEST_BOOST=keep) unless debug.env or the environment says otherwise.
+     * The toolkit's shared-core rules (+1..+14 run at normal, the 2 ms slice yield, the poll yield) were tuned on
+     * HP:CoS; here they left the loader thread (0x168B20) idle 15 to 60 s between characters while a cutscene's
+     * WaitForLoad held a black screen on Windows (issue #11, 169 s for the flying lesson). With keep it loads at once.
+     * RECOMP_GUEST_BOOST=share: the toolkit's rules back */
+    if (!GetEnvironmentVariableA("RECOMP_GUEST_BOOST", NULL, 0)) {
+        SetEnvironmentVariableA("RECOMP_GUEST_BOOST", "keep");
+        _putenv_s("RECOMP_GUEST_BOOST", "keep");
+    }
+    {
+        const char *k = getenv("RECOMP_GUEST_BOOST"), *c = getenv("RECOMP_GUEST_CORES");
+        fprintf(stderr, "[SCHED] RECOMP_GUEST_BOOST=%s RECOMP_GUEST_CORES=%s\n", k ? k : "", c ? c : "(pinned)");
+    }
+
     /* hpps.toml: display, resolution, anti-aliasing... (scda/app/app.cpp),
      * handed on as RECOMP_* variables before any thread reads them */
     {
@@ -857,7 +887,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         hpps_SettingsInit();
     }
 
-    printf("=== YOUR_GAME_NAME - Static Recompilation ===\n");
+    /* the window's title bar, "(XBOX Recomp) <name>" (fb_present.c) */
+    {
+        extern void xbox_FramebufferWindowSetGameName(const char *utf8);
+        xbox_FramebufferWindowSetGameName(HPPS_GAME_TITLE);
+    }
+
+    /* the build this log came from (CMakeLists.txt, tools/build_info.cmake) */
+    printf("=== " HPPS_GAME_TITLE " (" HPPS_EDITION_NAME ") - Static Recompilation ===\n");
+    printf("[VERSION] hpps v%s (%s build, built %s), commit %s\n", HPPS_VERSION_STR, HPPS_BUILD_KIND, HPPS_BUILT,
+           HPPS_GIT);
     printf("Loading XBE...\n");
 
     /* Install VEH handler (first handler in chain) */
@@ -1056,10 +1095,9 @@ static BOOL load_xbe(const char *path, void **out_data, size_t *out_size)
     return TRUE;
 }
 
-/* Console entry point (for debugging -- lets you see printf output) */
-int main(int argc, char **argv)
+/* The game is hpps_pal.dll / hpps_ntsc.dll: hpps.exe (src/stub/stub.c) loads the one for the edition in game\ and
+ * calls this, in its own process and on its main thread. Its only export (CMakeLists.txt). */
+__declspec(dllexport) int hpps_GameMain(void)
 {
-    (void)argc;
-    (void)argv;
     return WinMain(GetModuleHandle(NULL), NULL, GetCommandLineA(), SW_SHOW);
 }

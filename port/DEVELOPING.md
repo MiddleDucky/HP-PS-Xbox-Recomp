@@ -23,8 +23,8 @@ artwork. You need your own copy of the Xbox disc; the pipeline regenerates every
                           and the Python pipeline (xbe_parser, disasm, func_id, abi_analysis, recomp)
   cmake/ include/ docs/ tests/ LICENSES/   toolkit
   port/
-    CMakeLists.txt        the game: hpps.exe, hpps_launcher.exe, hpps_trainer.exe
-    regen.sh              XBE -> port/src/recomp/gen/*.c (generated, ignored by git)
+    CMakeLists.txt        the game: hpps.exe (PAL), hpps_ntsc.exe (NTSC-US, see 3.1), hpps_launcher.exe, hpps_trainer.exe
+    regen.sh [ntsc]       XBE -> port/src/recomp/gen/*.c or gen_ntsc/*.c (generated, ignored by git)
     icall_seeds.json      indirect-call targets the disassembler can't find by itself (regen.sh input)
     src/                  hand-written code
       main.c              startup: single instance / launcher check, debug.env, settings, XBE load, kernel
@@ -83,6 +83,33 @@ label moves.
 
 If the game jumps through a pointer to code the disassembler never saw (an `ICALL` failure in the log), add the
 target to `icall_seeds.json` and regenerate. `port/tools/scan_code_ptrs.py` lists code pointers found in data.
+
+### 3.1 Two editions: PAL and NTSC-US
+
+One source tree runs two discs: the PAL (Europe) *Philosopher's Stone* (`game/default.xbe` -> `gen/` -> `hpps.exe`)
+and the NTSC-US *Sorcerer's Stone* (`game/ntsc/default.xbe` -> `gen_ntsc/` -> `hpps_ntsc.exe`). The two XBEs are
+separate links of the same source: same title ID, size, sections and signature key; NTSC's `.text` is 32 bytes longer
+and its functions sit in blocks shifted by -0x5E0 .. +0x8E0; data after `.text` moves +0x20, except two runs in
+`.data`'s uninitialised part (+0x24 from 0x322CC8, +0x28 from 0x322D48 to 0x331AA0). The game even takes its edition
+behaviour from the disc: `disk.txt` holds `1` (PAL) or `2` (NTSC-US), which picks the start-up language table.
+
+```
+bash port/regen.sh          # PAL first: it also leaves port/tools/edition/pal_functions.json
+bash port/regen.sh ntsc     # NTSC-US: remakes the address map, then gen_ntsc/ from translated overrides
+```
+
+**Write every hand-written address as PAL's.** `port/tools/edition/pal2ntsc.py` maps PAL to NTSC (functions matched
+with their address operands masked, call and pointer votes, the data runs, and an exact table of every operand the two
+codes share), and the build compiles `hpps_ntsc` from copies of the game sources it translates into
+`build-*/ntsc_src/`: a PAL fix reaches NTSC-US by rebuilding. It reads `sub_`/`loc_` names, `0x` literals and bare
+`(00XXXXXX` macro arguments (`FALLBACK`, `HLE`). What it can't place stops the build (`--strict`): decide it in
+`port/tools/edition/rules.txt` (`keep` a constant, `map` an address found by hand), and rerun `regen.sh ntsc` when an
+override file changes which functions it defines. Only what really differs goes under `#if HPPS_NTSC`
+(`src/edition.h`): names, the edition check, the languages (NTSC-US: English and Spanish, stored as 0 and 4).
+
+`hpps_launcher.exe` serves both: it reads `game\default.xbe` to tell them apart, checks the folder against that disc's
+list (`launcher/game_files_pal.inc` / `game_files_ntsc.inc`), shows its title and languages, and starts `hpps.exe` or
+`hpps_ntsc.exe`.
 
 
 ## 4. Build
@@ -173,9 +200,9 @@ P8 palettes, fences, CopyRects, SetGammaRamp, a vblank callback. Movies are XMV 
 | `hle_input.c` | XInput onto the PC pad (`app/input.cpp`: remap, deadzones, keyboard and mouse); rumble forwarded on change only |
 | `hle_xapi.c` | XAPI: the disc authentication check succeeds (it booted to the dashboard otherwise) |
 | `hle_frontend.c` | "Quit To Desktop" row in the main and pause menus |
+| `hle_camera.c` | Free camera: the camera stick's up / down pitch the chase view (`sub_00014ED0` stick, `sub_00016450` view) |
 | `hle_anim.c` | animation start wrapper: door speed (`RECOMP_DOOR_SPEED`, default 1.8), anim/footstep traces |
 | `hle_trainer.c` | the debug trainer's game side, autoplay, checkpoints, debug report |
-| `hle_world.c` | characters taken out of the world (the cloisters pupil standing in the air at an authored height) |
 | `hle_debug.c` | debug hooks and traces (script, crabs, DS3D, file objects) |
 
 ### 6.3 Renderer notes (scda/gpu/d3d12.cpp)

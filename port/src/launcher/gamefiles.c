@@ -1,9 +1,10 @@
 // gamefiles.c - checking the game folder against the known-good list of the disc's files (gamefiles.h)
 //
-// The list (game_files.inc) was made from a folder that plays the whole game; this edition's files are the same bytes
-// in every copy, so anything else is damage (a bad copy, a disc read error, a failed download) or a file someone
-// changed. A sizes-only pass costs one directory lookup a file and runs on every start; reading every byte (2.6 GB)
-// runs once, after unpacking, and when asked.
+// Two lists, one per edition the port runs (game_files_pal.inc, game_files_ntsc.inc, made by tools/make_game_files.py
+// from folders that play the whole game); the folder's default.xbe says which one applies (gamefiles_DetectEdition).
+// An edition's files are the same bytes in every copy, so anything else is damage (a bad copy, a disc read error, a
+// failed download) or a file someone changed. A sizes-only pass costs one directory lookup a file and runs on every
+// start; reading every byte (3.1 GB PAL, 1.9 GB NTSC-US) runs once, after unpacking, and when asked.
 #include "gamefiles.h"
 
 #include <stdint.h>
@@ -17,25 +18,74 @@ typedef struct {
     uint32_t size, crc;
 } GameFile;
 
-static const GameFile kFiles[] = {
-#include "game_files.inc"
+static const GameFile kFilesPal[] = {
+#include "game_files_pal.inc"
 };
-#define FILE_COUNT ((int)(sizeof kFiles / sizeof kFiles[0]))
+static const GameFile kFilesNtsc[] = {
+#include "game_files_ntsc.inc"
+};
 
-// other good copies of a file, beside the list's (the list is generated; these are kept by hand). The list's
-// default.xbe is the commonly shared one, patched in one byte (0x145489, guest 0x155489: XAPI's start-up check's jge
-// 7D made jmp EB, so a failed media check no longer returns to the dashboard); the disc's own, unpatched XBE is the same
-// edition and plays the same (the code runs from the recompile; the XBE gives its data and passes the edition check)
-static const GameFile kAlso[] = {
-    {"default.xbe", 3264512u, 0x3D0FF840u},  // the retail DVD's, untouched (2026-11-01)
+static int g_edition = GAME_EDITION_PAL;
+static const GameFile* kFiles = kFilesPal;
+static int g_count = (int)(sizeof kFilesPal / sizeof kFilesPal[0]);
+#define FILE_COUNT g_count
+
+// other good copies of a file, beside the list's (the lists are generated; these are kept by hand).
+// PAL: the list's default.xbe is the commonly shared one, patched in one byte (0x145489, guest 0x155489: XAPI's
+// start-up check's jge 7D made jmp EB, so a failed media check no longer returns to the dashboard); the disc's own,
+// unpatched XBE is the same edition and plays the same (the code runs from the recompile; the XBE gives its data and
+// passes the edition check).
+// NTSC-US: the disc's own XBE is the list's; it already has that jmp (guest 0x154F29), so no patched copy goes round.
+static const struct {
+    int edition;
+    GameFile f;
+} kAlso[] = {
+    {GAME_EDITION_PAL, {"default.xbe", 3264512u, 0x3D0FF840u}},  // the retail DVD's, untouched (2026-11-01)
 };
 
 static BOOL AlsoGood(int i, uint32_t crc) {
     for (size_t k = 0; k < sizeof kAlso / sizeof kAlso[0]; k++)
-        if (!_stricmp(kAlso[k].path, kFiles[i].path) && kAlso[k].size == kFiles[i].size && kAlso[k].crc == crc)
+        if (kAlso[k].edition == g_edition && !_stricmp(kAlso[k].f.path, kFiles[i].path) &&
+            kAlso[k].f.size == kFiles[i].size && kAlso[k].f.crc == crc)
             return TRUE;
     return FALSE;
 }
+
+int gamefiles_DetectEdition(const WCHAR* dir) {
+    WCHAR path[MAX_PATH];
+    swprintf_s(path, MAX_PATH, L"%ls\\default.xbe", dir);
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return GAME_EDITION_NONE;
+    static uint8_t x[0x10000];  // the image header, certificate and section headers sit in the first pages
+    DWORD got = 0;
+    BOOL ok = ReadFile(h, x, sizeof x, &got, NULL);
+    CloseHandle(h);
+#define XBE32(o) (*(const uint32_t*)(x + (o)))
+    if (!ok || got < 0x180 || XBE32(0) != 0x48454258u) return GAME_EDITION_OTHER;  // "XBEH"
+    uint32_t base = XBE32(0x104), cert = XBE32(0x118) - base, sh = XBE32(0x120) - base;
+    if (cert + 12 > got || sh + 12 > got) return GAME_EDITION_OTHER;
+    uint32_t tid = XBE32(cert + 8), sections = XBE32(0x11C), text_va = XBE32(sh + 4), text_size = XBE32(sh + 8);
+#undef XBE32
+    // the two share title ID, size and section count; NTSC-US's code is 32 bytes longer (main.c's edition check)
+    if (tid != 0x45410037u || sections != 13 || text_va != 0x11000u) return GAME_EDITION_OTHER;
+    if (text_size == 1570580u) return GAME_EDITION_PAL;
+    if (text_size == 1570612u) return GAME_EDITION_NTSC;
+    return GAME_EDITION_OTHER;
+}
+
+void gamefiles_SetEdition(int edition) {
+    g_edition = edition == GAME_EDITION_NTSC ? GAME_EDITION_NTSC : GAME_EDITION_PAL;
+    if (g_edition == GAME_EDITION_NTSC) {
+        kFiles = kFilesNtsc;
+        g_count = (int)(sizeof kFilesNtsc / sizeof kFilesNtsc[0]);
+    } else {
+        kFiles = kFilesPal;
+        g_count = (int)(sizeof kFilesPal / sizeof kFilesPal[0]);
+    }
+}
+
+int gamefiles_Edition(void) { return g_edition; }
+
 #define READ_BUF   (4u << 20)
 
 // CRC-32 as zlib computes it (reflected, polynomial 0xEDB88320), eight bytes a step
@@ -78,7 +128,8 @@ DWORD gamefiles_ListId(void) {
         c = Crc(c, (const uint8_t*)&kFiles[i].size, 4);
         c = Crc(c, (const uint8_t*)&kFiles[i].crc, 4);
     }
-    for (size_t k = 0; k < sizeof kAlso / sizeof kAlso[0]; k++) c = Crc(c, (const uint8_t*)&kAlso[k].crc, 4);
+    for (size_t k = 0; k < sizeof kAlso / sizeof kAlso[0]; k++)
+        if (kAlso[k].edition == g_edition) c = Crc(c, (const uint8_t*)&kAlso[k].f.crc, 4);
     return c;
 }
 

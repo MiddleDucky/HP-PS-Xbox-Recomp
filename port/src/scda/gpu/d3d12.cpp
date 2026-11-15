@@ -557,6 +557,7 @@ struct Tex {
     uint32_t levels = 1;
     uint64_t sig = 0;
     uint64_t frame = 0;
+    uint64_t hd = 0;    // xboxrecomp: a button's picture drawn as its key in place of the guest's pixels (PromptLookup)
     bool norm = false;  // a normalization cube
 };
 
@@ -859,6 +860,7 @@ private:
     ID3D12Resource* BindGuestTexture(int stage, const TextureDesc& d, const FormatInfo& fi, DrawTextures& stages,
                                      uint32_t palette = 0);
     bool CreateTexture(Tex& tx, const TextureDesc& d, const FormatInfo& fi);
+    bool BindPromptTexture(Tex& tx, const TextureDesc& d, uint64_t hd);
     void UploadTexture(Tex& tx, const TextureDesc& d, const FormatInfo& fi, const uint8_t* p, bool same,
                        const uint32_t* palette = nullptr);
     void UploadTextureLevel(Tex& tx, uint32_t f, uint32_t l, const std::vector<uint8_t>& px, uint32_t pitch);
@@ -2476,7 +2478,8 @@ ComPtr<ID3D12PipelineState> D3D12Backend::CreatePipeline(const PsoKey& k, uint64
         pending = true;
         return nullptr;
     }
-    if (FAILED(dev_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) {
+    HRESULT made = dev_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso));
+    if (FAILED(made)) {
         // xboxrecomp: bytecode from base_shaders.bin this driver won't take: this PC's compiler makes it, once
         bool vs_base = DropBaseCode(k.vs);
         bool ps_base = DropBaseCode(k.ps);
@@ -2486,7 +2489,12 @@ ComPtr<ID3D12PipelineState> D3D12Backend::CreatePipeline(const PsoKey& k, uint64
             ID3DBlob* ps2 = EnsureShaderCode(k.ps, true, unused);
             if (vs2 && ps2) return CreatePipeline(k, h, vs2, ps2, gs, compile, pending);
         }
-        LOGE("d3d12: pipeline creation failed");
+        // xboxrecomp: which pipeline and why, as its draws are skipped from now on (psos_ keeps the null): 32 failed
+        // at every start on an RTX 3060 under vkd3d-proton (2026-11-01), unnamed. VKD3D_DEBUG=warn says more there
+        LOGE("d3d12: pipeline %016llX creation failed (0x%08lX), its draws are skipped: vs %016llX ps %016llX%s, %u "
+             "target(s) format %d, depth format %d, %u sample(s), topology type %d", (unsigned long long)h,
+             (unsigned long)made, (unsigned long long)k.vs, (unsigned long long)k.ps, gs ? " with a line gs" : "",
+             d.NumRenderTargets, int(d.RTVFormats[0]), int(d.DSVFormat), d.SampleDesc.Count, int(d.PrimitiveTopologyType));
         return nullptr;
     }
     cache::StorePipeline(name, pso.Get());
@@ -2754,6 +2762,279 @@ void FillTextureView(const Tex& tx, const TextureDesc& d, D3D12_SHADER_RESOURCE_
     }
 }
 
+// xboxrecomp: Button prompts (F10 Controls; input.cpp's app_PromptsKbm), as HP:PoA and HP:CoS have them. With
+// keyboard prompts the game's Xbox button pictures (sprites/xbox_*.btga in the .hog files, P8 with a palette) are drawn
+// as the key bound to that button: a key cap with its name, rimmed in the button's colour, or a mouse with that button
+// lit for a mouse button. Matched by the FNV-1a 32 of level 0 decoded to BGRA, which is what F12's tex_*.bmp hold, the
+// same every run (the HUD's wheel the same in 60 captures over several runs). The game still sees its own texture;
+// only what is sampled changes, so the picture may be any size (UVs are 0..1). The wheel (xbox_buttons.tga) is one
+// 128x128 picture whose quarters the HUD and the inventory draw (Y top left, B top right, A bottom left, X bottom
+// right: the uvrects of F12 capture 165519); its replacement keeps those quarters. RECOMP_PROMPT_LOG=1 names the
+// hash of every other picture of a button's size and format as it is first seen, to add one missing here (Black and
+// White alone have not been captured yet)
+extern "C" int app_PromptsKbm(void);               // input.cpp: draw the buttons as keys now
+extern "C" uint32_t app_PadInputKey(int pad_input);  // input.cpp: the key bound to a pad input (0 A .. 15 RThumb)
+
+constexpr int kPromptWheel = 100;  // the four face buttons in one picture
+
+struct PromptButton {
+    uint32_t hash;
+    int input;            // kPadInputNames: 0 A, 1 B, 2 X, 3 Y, 4 Black, 5 White, 6 LT, 7 RT, 12 Start, 13 Back
+    uint8_t r, g, b;      // its colour, the key cap's rim
+    const char* name;
+    float scale;          // the key's size in its picture (or quarter): the game's button covers that much of it
+};
+static const PromptButton kPromptButtons[] = {
+    // the sizes from the originals' opaque pixels (F12 captures 145522, 165519; 2026-11-10): each wheel button is a
+    // 38 px disc in the middle of its 64 px quarter, the L / R shields 19 px wide in 32, X Y B BACK fill theirs
+    {0x40230B37u, kPromptWheel, 0, 0, 0, "the face buttons (HUD, inventory)", 0.62f},  // xbox_buttons.tga, 128x128
+    // 2026-11-10: the HUD's wheel while a button is held (F12 130641), the front end's ("A Select", "B Exit": 193444)
+    {0x096BB5B1u, kPromptWheel, 0, 0, 0, "the face buttons (HUD, a button held)", 0.62f},
+    {0x8A5448DDu, kPromptWheel, 0, 0, 0, "the face buttons (menus)", 0.62f},
+    {0x2C81DF34u, 0, 0x4C, 0xB0, 0x2C, "A", 1.0f},      // xbox_a, 32x32 ("CLOSE BOOK": F12 130706)
+    {0xF271E68Du, 2, 0x2C, 0x58, 0xD0, "X", 1.0f},      // xbox_x, 32x32 (the inventory's "to equip")
+    {0xFD4551AAu, 3, 0xE8, 0xC0, 0x20, "Y", 1.0f},      // xbox_y
+    {0xAE8CA95Au, 1, 0xD0, 0x2C, 0x2C, "B", 1.0f},      // xbox_b
+    {0x19A0D9FFu, 13, 0x90, 0x90, 0x90, "Back", 1.0f},  // xbox_button_back ("Exit Remembrall")
+    {0xF9EBFCC5u, 6, 0x90, 0x90, 0x90, "LT", 0.62f},    // xbox_L_shoulder_icon (the inventory's pages)
+    {0x189731D1u, 7, 0x90, 0x90, 0x90, "RT", 0.62f},    // xbox_R_shoulder_icon
+};
+constexpr int kPromptCount = int(sizeof kPromptButtons / sizeof kPromptButtons[0]);
+
+static bool PromptCandidate(const TextureDesc& d) {
+    return d.format == 0x0B && d.width == d.height && (d.width == 32 || d.width == 64 || d.width == 128) && !d.cube &&
+           d.depth == 1 && !d.linear;
+}
+
+// the replacement key for this texture (bit 63 set, the button's index below), 0 for none
+static uint64_t PromptLookup(const TextureDesc& d, const uint8_t* p, const uint32_t* pal) {
+    if (!p || !pal || !PromptCandidate(d) || !app_PromptsKbm()) return 0;
+    std::vector<uint8_t> px;
+    uint32_t pitch = 0;
+    DecodeLevel(d, 0, 0, p, pal, px, pitch);
+    if (pitch < d.width * 4 || px.size() < size_t(pitch) * d.height) return 0;
+    uint32_t h = 2166136261u;
+    for (uint32_t y = 0; y < d.height; y++)
+        for (uint32_t k = 0; k < d.width * 4; k++) h = (h ^ px[size_t(y) * pitch + k]) * 16777619u;
+    for (int i = 0; i < kPromptCount; i++)
+        if (kPromptButtons[i].hash == h) return 1ull << 63 | uint64_t(i);
+    static const bool log = [] {
+        const char* e = std::getenv("RECOMP_PROMPT_LOG");
+        return e && e[0] == '1';
+    }();
+    if (log) {
+        static std::unordered_set<uint32_t> told;
+        if (told.insert(h).second)
+            fprintf(stderr, "[PROMPTS] P8 %ux%u at %08X hash %08X (not a button here)\n", d.width, d.height, d.data, h);
+    }
+    return 0;
+}
+
+// coverage of a rounded rectangle (centre cx cy, half sizes hx hy, corner radius r) at a pixel centre, anti-aliased
+static float RoundRect(float x, float y, float cx, float cy, float hx, float hy, float r) {
+    float qx = std::fabs(x - cx) - (hx - r), qy = std::fabs(y - cy) - (hy - r);
+    float out = std::hypot(std::max(qx, 0.0f), std::max(qy, 0.0f)) + std::min(std::max(qx, qy), 0.0f) - r;
+    return std::clamp(0.5f - out, 0.0f, 1.0f);
+}
+
+static void Over(uint8_t* px, float a, uint8_t r, uint8_t g, uint8_t b) {  // BGRA, straight alpha
+    if (a <= 0.0f) return;
+    float da = px[3] / 255.0f, oa = a + da * (1 - a);
+    auto mix = [&](uint8_t dst, uint8_t src) { return uint8_t((src * a + dst * da * (1 - a)) / oa + 0.5f); };
+    px[0] = mix(px[0], b), px[1] = mix(px[1], g), px[2] = mix(px[2], r), px[3] = uint8_t(oa * 255 + 0.5f);
+}
+
+// the label's coverage (white on black through GDI) in a size x size square, its font shrunk until it fits w x h
+static std::vector<uint8_t> LabelMask(const char* text, int size, int w, int h) {
+    std::vector<uint8_t> m(size_t(size) * size);
+    HDC dc = CreateCompatibleDC(nullptr);
+    BITMAPINFO bi{};
+    bi.bmiHeader = {sizeof(BITMAPINFOHEADER), size, -size, 1, 32, BI_RGB};
+    void* bits = nullptr;
+    HBITMAP bmp = dc ? CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0) : nullptr;
+    if (!dc || !bmp || !bits) {
+        if (bmp) DeleteObject(bmp);
+        if (dc) DeleteDC(dc);
+        return m;
+    }
+    HGDIOBJ old = SelectObject(dc, bmp);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(255, 255, 255));
+    for (int pt = std::max(h, 8);; pt -= 2) {
+        HFONT f = CreateFontA(-pt, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+                              ANTIALIASED_QUALITY, DEFAULT_PITCH, "Arial");
+        HGDIOBJ of = SelectObject(dc, f);
+        SIZE sz{};
+        GetTextExtentPoint32A(dc, text, int(std::strlen(text)), &sz);
+        const bool fits = sz.cx <= w || pt - 2 < 8;  // the smallest size is drawn whether it fits or not
+        if (fits) {
+            std::memset(bits, 0, size_t(size) * size * 4);
+            RECT rc{0, 0, size, size};
+            DrawTextA(dc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            GdiFlush();
+            const uint8_t* b = static_cast<const uint8_t*>(bits);
+            for (size_t k = 0; k < m.size(); k++) m[k] = std::max({b[k * 4], b[k * 4 + 1], b[k * 4 + 2]});
+        }
+        SelectObject(dc, of);
+        DeleteObject(f);
+        if (fits) break;
+    }
+    SelectObject(dc, old);
+    DeleteObject(bmp);
+    DeleteDC(dc);
+    return m;
+}
+
+// one key (or mouse) in the 128x128 cell at (ox, oy) of a stride-wide BGRA picture, s of the cell's size around its
+// centre (the shapes below are in the cell's 128 units at s 1); false when the input is unbound. Round, as the Xbox's
+// own buttons are: a dark edge, a pale ring and a face of the button's colour, lighter toward the top left, with the
+// key's name (white with a shadow, dark on a light colour), or for a mouse button a small mouse on the face with that
+// button lit in a darker shade of the colour
+static bool PromptKey(std::vector<uint8_t>& px, int stride, int ox, int oy, int input, uint8_t r, uint8_t g, uint8_t b,
+                      float s) {
+    constexpr int N = 128;
+    constexpr float kMouse = 0.6f;  // the mouse's size on the face
+    // a rounded rectangle given in the 128 units, drawn at k around the cell's centre
+    auto rr = [](float fx, float fy, float k, float cx, float cy, float hx, float hy, float rad) {
+        return RoundRect(fx, fy, 64 + (cx - 64) * k, 64 + (cy - 64) * k, hx * k, hy * k, rad * k);
+    };
+    const uint32_t vk = app_PadInputKey(input);
+    if (!vk) return false;
+    const bool mouse = vk == 0x01 || vk == 0x02 || vk == 0x04;
+    const float ms = s * kMouse;
+    auto at = [&](int x, int y) { return &px[(size_t(oy + y) * stride + ox + x) * 4]; };
+    for (int y = 0; y < N; y++) {
+        for (int x = 0; x < N; x++) {
+            uint8_t* o = at(x, y);
+            const float fx = x + 0.5f, fy = y + 0.5f;
+            // the disc: dark edge, pale ring, the button's colour as the face with a highlight up and to the left
+            Over(o, rr(fx, fy, s, 64, 64, 62, 62, 62), 0x20, 0x1C, 0x18);
+            Over(o, rr(fx, fy, s, 64, 64, 58, 58, 58), 0xE8, 0xDC, 0xB0);
+            const float hl =
+                std::clamp(1.0f - std::hypot(fx - (64 - 18 * s), fy - (64 - 20 * s)) / (60 * s), 0.0f, 1.0f) * 0.45f;
+            auto lift = [hl](uint8_t c) { return uint8_t(c + (255 - c) * hl + 0.5f); };
+            Over(o, rr(fx, fy, s, 64, 64, 49, 49, 49), lift(r), lift(g), lift(b));
+            if (!mouse) continue;
+            // a mouse on the face: its body, the button pressed in the button's colour, the lines between the buttons
+            const float u = 64 + (fx - 64) / ms, v = 64 + (fy - 64) / ms;  // in the mouse's 128 units
+            Over(o, rr(fx, fy, ms, 64, 64, 40, 58, 38), 0x20, 0x1C, 0x18);
+            Over(o, rr(fx, fy, ms, 64, 64, 34, 52, 32), 0xFF, 0xFC, 0xF4);
+            const bool lit = vk == 0x04 ? std::fabs(u - 64) < 7 && v > 20 && v < 52
+                                        : (vk == 0x01 ? u < 62 : u > 66) && v < 58;
+            if (lit) Over(o, rr(fx, fy, ms, 64, 64, 34, 52, 32), uint8_t(r * 0.6f), uint8_t(g * 0.6f), uint8_t(b * 0.6f));
+            // the lines at least a pixel wide however small the mouse
+            if (std::fabs(fy - (64 + (60 - 64) * ms)) < std::max(2.5f * ms, 0.75f) && std::fabs(u - 64) < 34)
+                Over(o, 1.0f, 0x20, 0x1C, 0x18);
+            if (std::fabs(fx - 64) < std::max(2.0f * ms, 0.75f) && v > 12 && v < 60) Over(o, 1.0f, 0x20, 0x1C, 0x18);
+        }
+    }
+    if (!mouse) {
+        std::string label = app::KeyName(vk);
+        if (label == "Escape") label = "Esc";
+        else if (label == "Backspace") label = "Bksp";
+        else if (label == "CapsLock") label = "Caps";
+        else if (label == "Mouse4") label = "M4";
+        else if (label == "Mouse5") label = "M5";
+        std::vector<uint8_t> m =
+            LabelMask(label.c_str(), N, int(78 * s), int((label.size() == 1 ? 60 : 34) * s));
+        // dark on a light face (the yellow), else white over a dark shadow down and to the right
+        const bool light = 0.299f * r + 0.587f * g + 0.114f * b > 160;
+        const int sh = std::max(1, int(3 * s + 0.5f));
+        if (!light)
+            for (int y = sh; y < N; y++)
+                for (int x = sh; x < N; x++) {
+                    const uint8_t c = m[size_t(y - sh) * N + x - sh];
+                    if (c) Over(at(x, y), c / 255.0f * 0.8f, 0x20, 0x1C, 0x18);
+                }
+        for (int y = 0; y < N; y++)
+            for (int x = 0; x < N; x++) {
+                const uint8_t c = m[size_t(y) * N + x];
+                if (!c) continue;
+                if (light) Over(at(x, y), c / 255.0f, 0x22, 0x1E, 0x18);
+                else Over(at(x, y), c / 255.0f, 0xFF, 0xFF, 0xFF);
+            }
+    }
+    return true;
+}
+
+static bool PromptPicture(int index, std::vector<uint8_t>& px, uint32_t* w, uint32_t* h) {
+    if (index < 0 || index >= kPromptCount) return false;
+    const PromptButton& pb = kPromptButtons[index];
+    if (pb.input == kPromptWheel) {
+        // Y, B / A, X in the picture's quarters, each in its own colour; a button with no key keeps an empty quarter
+        *w = *h = 256;
+        px.assign(size_t(256) * 256 * 4, 0);
+        bool any = PromptKey(px, 256, 0, 0, 3, 0xE8, 0xC0, 0x20, pb.scale);
+        any |= PromptKey(px, 256, 128, 0, 1, 0xD0, 0x2C, 0x2C, pb.scale);
+        any |= PromptKey(px, 256, 0, 128, 0, 0x4C, 0xB0, 0x2C, pb.scale);
+        any |= PromptKey(px, 256, 128, 128, 2, 0x2C, 0x58, 0xD0, pb.scale);
+        if (!any) return false;
+    } else {
+        *w = *h = 128;
+        px.assign(size_t(128) * 128 * 4, 0);
+        // unbound: the game's own button
+        if (!PromptKey(px, 128, 0, 0, pb.input, pb.r, pb.g, pb.b, pb.scale)) return false;
+    }
+    static uint32_t told[kPromptCount];
+    const uint32_t vk = pb.input == kPromptWheel ? app_PadInputKey(0) ^ app_PadInputKey(1) << 8 ^
+                                                       app_PadInputKey(2) << 16 ^ app_PadInputKey(3) << 24
+                                                 : app_PadInputKey(pb.input);
+    if (told[index] != vk) {
+        told[index] = vk;
+        fprintf(stderr, "[PROMPTS] %s drawn as %s\n", pb.name,
+                pb.input == kPromptWheel ? "keys" : app::KeyName(app_PadInputKey(pb.input)));
+    }
+    return true;
+}
+
+// false when it could not be used; the caller's texture may then have no resource
+bool D3D12Backend::BindPromptTexture(Tex& tx, const TextureDesc& d, uint64_t hd) {
+    std::vector<uint8_t> px;
+    uint32_t w = 0, h = 0, levels = 1;
+    if (!PromptPicture(int(hd & 0xFF), px, &w, &h)) return false;
+    for (uint32_t m = std::max(w, h); m > 1; m >>= 1) levels++;
+    if (tx.res) CurrentFrame().garbage.push_back(tx.res);
+    tx = Tex{};
+    tx.d = d;
+    tx.fmt = DXGI_FORMAT_B8G8R8A8_UNORM;
+    tx.levels = levels;
+    D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_DEFAULT};
+    D3D12_RESOURCE_DESC td{};
+    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    td.Width = w;
+    td.Height = h;
+    td.DepthOrArraySize = 1;
+    td.MipLevels = UINT16(levels);
+    td.Format = tx.fmt;
+    td.SampleDesc.Count = 1;
+    if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                             IID_PPV_ARGS(&tx.res)))) {
+        return false;
+    }
+    for (uint32_t l = 0;; l++) {
+        UploadTextureLevel(tx, 0, l, px, w * 4);
+        if (l + 1 == levels) break;
+        // the next level, a 2x2 box
+        uint32_t nw = std::max(w / 2, 1u), nh = std::max(h / 2, 1u);
+        std::vector<uint8_t> next(size_t(nw) * nh * 4);
+        for (uint32_t y = 0; y < nh; y++) {
+            const uint8_t* r0 = &px[size_t(std::min(y * 2, h - 1)) * w * 4];
+            const uint8_t* r1 = &px[size_t(std::min(y * 2 + 1, h - 1)) * w * 4];
+            uint8_t* o = &next[size_t(y) * nw * 4];
+            for (uint32_t c = 0; c < nw * 4; c++) {
+                uint32_t a0 = c / 4 * 2, a1 = std::min(a0 + 1, w - 1), ch = c % 4;
+                o[c] = uint8_t((r0[a0 * 4 + ch] + r0[a1 * 4 + ch] + r1[a0 * 4 + ch] + r1[a1 * 4 + ch] + 2) >> 2);
+            }
+        }
+        px.swap(next);
+        w = nw, h = nh;
+    }
+    D3D12_RESOURCE_STATES st = D3D12_RESOURCE_STATE_COPY_DEST;
+    Transition(tx.res.Get(), st, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    tx.hd = hd;
+    return true;
+}
+
 // a texture in guest memory: made again when its layout changed, uploaded again when its bytes did
 ID3D12Resource* D3D12Backend::BindGuestTexture(int stage, const TextureDesc& d, const FormatInfo& fi,
                                                DrawTextures& stages, uint32_t palette) {
@@ -2771,9 +3052,29 @@ ID3D12Resource* D3D12Backend::BindGuestTexture(int stage, const TextureDesc& d, 
         const uint8_t* p = static_cast<const uint8_t*>(kernel::HostPtr(d.data));
         uint64_t sig = MemSig(d.data, total) ^ DirtyEpoch(d.data);
         if (pal) sig ^= Hash(pal, 256 * 4) * 31;
+        // a button's picture drawn as its key: a new binding (F10) or the other device (Automatic) draws it again at once
+        if (pal && PromptCandidate(d)) {
+            if (app_PromptsKbm())
+                for (int b = 0; b < 16; b++) sig ^= uint64_t(app_PadInputKey(b)) * (0x9E3779B97F4A7C15ull >> b) ^ uint64_t(b) << 40;
+            else
+                sig ^= 0x50414442ull;
+        }
         if (sig != tx.sig || !same) {
+            uint64_t hd = PromptLookup(d, p, pal);
+            if (hd && !BindPromptTexture(tx, d, hd)) {
+                hd = 0;
+                if (!tx.res) same = false;
+                if (!tx.res && !CreateTexture(tx, d, fi)) return nullptr;
+            }
+            if (!hd) {
+                if (tx.hd) {  // back to the guest's own pixels, in the guest's own layout
+                    same = false;
+                    if (!CreateTexture(tx, d, fi)) return nullptr;
+                }
+                UploadTexture(tx, d, fi, p, same, pal);
+            }
+            tx.frame = presents_ + 1;
             tx.sig = sig;
-            UploadTexture(tx, d, fi, p, same, pal);
         }
     }
     FillTextureView(tx, d, stages.sv[stage]);

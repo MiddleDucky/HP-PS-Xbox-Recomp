@@ -53,7 +53,12 @@ endif()
 
 # Add xboxrecomp as a subdirectory -- this builds all 6 runtime libraries
 # and provides the 'xboxrecomp' umbrella target to link against.
-add_subdirectory(${XBOXRECOMP_DIR} ${CMAKE_BINARY_DIR}/xboxrecomp)
+# HPPS_LAUNCHER_ONLY: hpps_launcher.exe alone, from the public sources only (no xboxrecomp, no generated code, no game
+# files): the CI build (.github/workflows/launcher.yml) that SignPath signs, as signing needs the exe built from the repo
+option(HPPS_LAUNCHER_ONLY "Build only hpps_launcher.exe (CI / code signing)" OFF)
+if(NOT HPPS_LAUNCHER_ONLY)
+    add_subdirectory(${XBOXRECOMP_DIR} ${CMAKE_BINARY_DIR}/xboxrecomp)
+endif()
 
 # ── Recompiled game executable ──────────────────────────────────
 
@@ -86,8 +91,8 @@ set(GAME_SOURCES
     src/hle_trainer.c
     # "Quit To Desktop" on the main menu (RECOMP_QUIT_ITEM=0 = Xbox menu).
     src/hle_frontend.c
-    # Characters taken out of the world, never drawn (RECOMP_HIDE_CHARACTERS=0 = drawn).
-    src/hle_world.c
+    # Free camera: the camera stick's up / down tilt the play camera (F10 Enhancements).
+    src/hle_camera.c
     src/profiler.c
     # Direct3D 8 on a host D3D12 renderer, ported from SCDA-XBERecomp
     # (src/scda, MIT): the XDK's D3D entry points instead of the NV2A.
@@ -101,7 +106,7 @@ set(GAME_SOURCES
     #   --exclude-manual port/src/hle_anim.c
     #   --exclude-manual port/src/hle_trainer.c
     #   --exclude-manual port/src/hle_frontend.c
-    #   --exclude-manual port/src/hle_world.c
+    #   --exclude-manual port/src/hle_camera.c
     #   --exclude-manual port/src/scda/xdk/hle_d3d8.cpp
     # Add game-specific sources here, e.g.:
     # src/asset_loader.c
@@ -125,7 +130,7 @@ set(HPPS_RC_ICON "1 ICON \"${CMAKE_CURRENT_SOURCE_DIR}/res/app.ico\"\n")
 # empty without art: windres refuses a resource script with no resources
 # HPPS_VERSION: the release's version (tools/package_release.sh passes VERSION), in Properties > Details as the file
 # and product version; the description is the product's name, the copyright the port's author
-set(HPPS_VERSION "0.4.2" CACHE STRING "the release version, major.minor.patch")
+set(HPPS_VERSION "0.5.0" CACHE STRING "the release version, major.minor.patch")
 string(REGEX MATCHALL "[0-9]+" hpps_ver_parts "${HPPS_VERSION}.0.0.0")
 list(GET hpps_ver_parts 0 hpps_v0)
 list(GET hpps_ver_parts 1 hpps_v1)
@@ -144,11 +149,77 @@ file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/launcher_res.rc"
 # the icon is named by these scripts, not part of them: without this a new res/app.ico left the old one in the exes
 set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/hpps_res.rc" "${CMAKE_CURRENT_BINARY_DIR}/launcher_res.rc" PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/res/app.ico")
 
-add_executable(${PROJECT_NAME} WIN32
-    ${GAME_SOURCES}
-    ${RECOMP_GEN_SOURCES}
-    ${CMAKE_CURRENT_BINARY_DIR}/hpps_res.rc
-)
+# hpps_launcher.exe: 4:3 or 16:9 and the graphics settings, then bin\hpps.exe (src/launcher/launcher.cpp)
+if(WIN32)
+    set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui)
+    add_executable(hpps_launcher WIN32
+        src/launcher/launcher.cpp
+        src/launcher/xiso.c  # unpacks a disc image in game\ before the first start
+        src/launcher/gamefiles.c  # checks game\ against the disc's files (game_files.inc)
+        ${CMAKE_CURRENT_BINARY_DIR}/launcher_res.rc
+        ${IMGUI_DIR}/imgui.cpp ${IMGUI_DIR}/imgui_draw.cpp ${IMGUI_DIR}/imgui_tables.cpp
+        ${IMGUI_DIR}/imgui_widgets.cpp ${IMGUI_DIR}/backends/imgui_impl_win32.cpp
+        ${IMGUI_DIR}/backends/imgui_impl_dx11.cpp)
+    target_include_directories(hpps_launcher PRIVATE ${IMGUI_DIR})
+    set_target_properties(hpps_launcher PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+    target_compile_options(hpps_launcher PRIVATE -O2)
+    target_link_options(hpps_launcher PRIVATE -static -static-libgcc -static-libstdc++ -mwindows)
+    target_link_libraries(hpps_launcher PRIVATE d3d11 dxgi d3dcompiler ole32 imm32 dwmapi gdi32 xinput1_4)
+    # both editions: it starts hpps.exe, which reads game\default.xbe and loads hpps_pal.dll or hpps_ntsc.dll
+    target_compile_definitions(hpps_launcher PRIVATE HPPS_LAUNCHER)
+endif()
+
+if(HPPS_LAUNCHER_ONLY)
+    return()
+endif()
+
+# The game is one DLL per edition, hpps_pal.dll (here) and hpps_ntsc.dll (below), and hpps.exe is the small program
+# that loads one (src/stub/stub.c): game\default.xbe says which. Each DLL is a whole link of its own (its generated
+# code, the game sources, xboxrecomp), so the two editions' same-named functions never meet. It exports one function,
+# hpps_GameMain (main.c); that explicit dllexport keeps ld from exporting every other symbol.
+# The preferred base puts the DLL just above hpps.exe (0x140000000) and below the guest memory's high fallbacks
+# (0x200000000 up, xbox_memory_layout.c); both stay relocatable (ASLR).
+hpps_version_rc(HPPS_RC_VERSION_PAL "hpps_pal.dll")
+file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/hpps_pal_res.rc"
+     CONTENT "// generated by CMakeLists.txt\n${HPPS_RC_VERSION_PAL}")
+if(WIN32)
+    add_library(hpps_pal SHARED
+        ${GAME_SOURCES}
+        ${RECOMP_GEN_SOURCES}
+        ${CMAKE_CURRENT_BINARY_DIR}/hpps_pal_res.rc
+    )
+    # bin\ under the build folder, as in a release: the launcher above it, game\ and saves\ beside the launcher
+    set_target_properties(hpps_pal PROPERTIES PREFIX "" OUTPUT_NAME hpps_pal
+                          RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin")
+    target_link_options(hpps_pal PRIVATE -Wl,--image-base=0x150000000)
+
+    # hpps.exe: what the launcher starts. It carries the icon (resource 1, which the game's window loads from the
+    # process's exe) and the version; `--target hpps` builds it and every edition's DLL
+    add_executable(hpps WIN32 src/stub/stub.c src/launcher/gamefiles.c ${CMAKE_CURRENT_BINARY_DIR}/hpps_res.rc)
+    target_compile_options(hpps PRIVATE -O2)
+    target_link_options(hpps PRIVATE -static -static-libgcc)
+    set_target_properties(hpps PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin")
+    add_dependencies(hpps hpps_pal)
+else()
+    add_executable(hpps_pal ${GAME_SOURCES} ${RECOMP_GEN_SOURCES})
+endif()
+
+# the run log's first line (main.c): the version, the kind of build and the repository's commit, so a player's log
+# says which build it came from. build_info.h is remade on every build (tools/build_info.cmake)
+add_custom_target(hpps_build_info
+    COMMAND ${CMAKE_COMMAND} -DREPO=${CMAKE_CURRENT_SOURCE_DIR}/.. -DOUT=${CMAKE_CURRENT_BINARY_DIR}/build_info.h
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/build_info.cmake
+    BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/build_info.h
+    VERBATIM)
+add_dependencies(hpps_pal hpps_build_info)
+if(HPPS_RELEASE)
+    set(hpps_build_kind "release")
+else()
+    set(hpps_build_kind "dev ${CMAKE_BUILD_TYPE}")
+endif()
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/src/main.c PROPERTIES
+    COMPILE_DEFINITIONS "HPPS_VERSION_STR=\"${HPPS_VERSION}\";HPPS_BUILD_KIND=\"${hpps_build_kind}\""
+    INCLUDE_DIRECTORIES "${CMAKE_CURRENT_BINARY_DIR}")
 
 # MinGW GCC 16 at -O3 sometimes hoists the address of a thread local array out of a loop as a plain global: the
 # lifted code then reads the TLS template instead of the thread's copy (g_fp_stack in sub_00036EC0, which turned the
@@ -162,18 +233,18 @@ if(WIN32)
     endif()
     find_package(Python3 COMPONENTS Interpreter)
     if(Python3_FOUND)
-        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        add_custom_command(TARGET hpps_pal POST_BUILD
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_tls_refs.py
-                    --objdump ${CMAKE_OBJDUMP} --nm ${CMAKE_NM} $<TARGET_FILE:${PROJECT_NAME}>
+                    --objdump ${CMAKE_OBJDUMP} --nm ${CMAKE_NM} $<TARGET_FILE:hpps_pal>
             VERBATIM)
     endif()
 endif()
 
 # Link against the xboxrecomp umbrella target (all 6 runtime libraries)
-target_link_libraries(${PROJECT_NAME} PRIVATE xboxrecomp)
+target_link_libraries(hpps_pal PRIVATE xboxrecomp)
 
 # Include paths for generated recomp headers
-target_include_directories(${PROJECT_NAME} PRIVATE
+target_include_directories(hpps_pal PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/src/recomp
     ${XBOXRECOMP_DIR}/include
@@ -181,7 +252,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 
 # SCDA-XBERecomp's renderer (src/scda/gpu): XDK Direct3D state to D3D12.
 if(WIN32)
-    target_sources(${PROJECT_NAME} PRIVATE
+    target_sources(hpps_pal PRIVATE
         src/scda/app/app.cpp
         src/scda/gpu/d3d12.cpp
         src/scda/gpu/pipeline_cache.cpp
@@ -194,7 +265,7 @@ if(WIN32)
     )
     # Dear ImGui v1.91.0 (third_party/imgui, MIT), as SCDA: the F10 options panel
     set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui)
-    target_sources(${PROJECT_NAME} PRIVATE
+    target_sources(hpps_pal PRIVATE
         ${IMGUI_DIR}/imgui.cpp ${IMGUI_DIR}/imgui_draw.cpp ${IMGUI_DIR}/imgui_tables.cpp
         ${IMGUI_DIR}/imgui_widgets.cpp ${IMGUI_DIR}/backends/imgui_impl_win32.cpp
         ${IMGUI_DIR}/backends/imgui_impl_dx12.cpp)
@@ -210,24 +281,24 @@ if(WIN32)
         PROPERTIES INCLUDE_DIRECTORIES
         "${CMAKE_CURRENT_SOURCE_DIR}/src/scda;${XBOXRECOMP_DIR}/src;${IMGUI_DIR}"
         COMPILE_OPTIONS "-msse4.1")
-    set_target_properties(${PROJECT_NAME} PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+    set_target_properties(hpps_pal PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
 endif()
 
 if(WIN32)
     # the C++ renderer must not need MinGW's libstdc++/libgcc/winpthread DLLs at run time
-    target_link_options(hpps PRIVATE -static -static-libgcc -static-libstdc++)
-    target_link_libraries(hpps PRIVATE d3d11 d3d12 d3dcompiler dxgi dxguid xinput1_4 winmm dbghelp xaudio2_8 ole32 imm32 dwmapi gdi32)
+    target_link_options(hpps_pal PRIVATE -static -static-libgcc -static-libstdc++)
+    target_link_libraries(hpps_pal PRIVATE d3d11 d3d12 d3dcompiler dxgi dxguid xinput1_4 winmm dbghelp xaudio2_8 ole32 imm32 dwmapi gdi32)
 else()
-    target_link_options(hpps PRIVATE -rdynamic)
+    target_link_options(hpps_pal PRIVATE -rdynamic)
 endif()
 
 # MSVC-specific: large address aware, increase section limit for big generated files
 if(MSVC)
-    target_link_options(${PROJECT_NAME} PRIVATE
+    target_link_options(hpps_pal PRIVATE
         /LARGEADDRESSAWARE
     )
     # The generated code files can be very large. Increase object file section limit.
-    target_compile_options(${PROJECT_NAME} PRIVATE /bigobj)
+    target_compile_options(hpps_pal PRIVATE /bigobj)
 endif()
 
 # ── Game-specific additions ─────────────────────────────────────
@@ -236,13 +307,13 @@ endif()
 # Examples:
 #
 # # Custom texture loader for your game's format
-# target_sources(${PROJECT_NAME} PRIVATE src/texture_loader.c)
+# target_sources(hpps_pal PRIVATE src/texture_loader.c)
 #
 # # If your game uses RenderWare, you may need a RW bridge layer
-# target_sources(${PROJECT_NAME} PRIVATE src/rw_bridge.c)
+# target_sources(hpps_pal PRIVATE src/rw_bridge.c)
 #
 # # Additional compile definitions for debugging
-# target_compile_definitions(${PROJECT_NAME} PRIVATE
+# target_compile_definitions(hpps_pal PRIVATE
 #     ENABLE_ICALL_TRACE=1
 #     VERBOSE_KERNEL_LOG=1
 # )
@@ -250,33 +321,109 @@ endif()
 # HPPS_CALL_PROFILE: count every direct call by target (F7 dumps calls_N.txt, see profiler.c)
 option(HPPS_CALL_PROFILE "Count direct calls per target, F7 dumps" OFF)
 if(HPPS_CALL_PROFILE)
-    target_compile_definitions(${PROJECT_NAME} PRIVATE RECOMP_CALL_PROFILE)
+    target_compile_definitions(hpps_pal PRIVATE RECOMP_CALL_PROFILE)
 endif()
 
 # HPPS_DIFFTEST: compare every called function with its original x86 in Unicorn (F5 sweep, difftest.txt; see
 # src/difftest.c). Needs unicorn.dll next to the executable.
 option(HPPS_DIFFTEST "Differential test against the original x86 (Unicorn)" OFF)
 if(HPPS_DIFFTEST)
-    target_sources(${PROJECT_NAME} PRIVATE src/difftest.c)
-    target_include_directories(${PROJECT_NAME} PRIVATE third_party/unicorn)
-    target_compile_definitions(${PROJECT_NAME} PRIVATE RECOMP_DIFFTEST)
+    target_sources(hpps_pal PRIVATE src/difftest.c)
+    target_include_directories(hpps_pal PRIVATE third_party/unicorn)
+    target_compile_definitions(hpps_pal PRIVATE RECOMP_DIFFTEST)
 endif()
 
-# hpps_launcher.exe: 4:3 or 16:9 and the graphics settings, then hpps.exe (src/launcher/launcher.cpp)
-if(WIN32)
-    add_executable(hpps_launcher WIN32
-        src/launcher/launcher.cpp
-        src/launcher/xiso.c  # unpacks a disc image in game\ before the first start
-        src/launcher/gamefiles.c  # checks game\ against the disc's files (game_files.inc)
-        ${CMAKE_CURRENT_BINARY_DIR}/launcher_res.rc
-        ${IMGUI_DIR}/imgui.cpp ${IMGUI_DIR}/imgui_draw.cpp ${IMGUI_DIR}/imgui_tables.cpp
-        ${IMGUI_DIR}/imgui_widgets.cpp ${IMGUI_DIR}/backends/imgui_impl_win32.cpp
-        ${IMGUI_DIR}/backends/imgui_impl_dx11.cpp)
-    target_include_directories(hpps_launcher PRIVATE ${IMGUI_DIR})
-    set_target_properties(hpps_launcher PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
-    target_compile_options(hpps_launcher PRIVATE -O2)
-    target_link_options(hpps_launcher PRIVATE -static -static-libgcc -static-libstdc++ -mwindows)
-    target_link_libraries(hpps_launcher PRIVATE d3d11 dxgi d3dcompiler ole32 imm32 dwmapi gdi32 xinput1_4)
+# ── hpps_ntsc.dll: the NTSC-US Sorcerer's Stone ─────────────────────────────────
+# The same game sources: the hand-written files that hold guest addresses are written with the PAL ones and compiled
+# here as copies translated by tools/edition/pal2ntsc.py (its map and the generated code from port/regen.sh ntsc);
+# HPPS_NTSC=1 picks what really differs (edition.h). Built only once regen.sh ntsc has made gen_ntsc.
+set(HPPS_EDITION_MAP "${CMAKE_CURRENT_SOURCE_DIR}/tools/edition/pal2ntsc_map.json")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/recomp/gen_ntsc/recomp_dispatch.c" AND EXISTS "${HPPS_EDITION_MAP}")
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    file(GLOB RECOMP_GEN_NTSC_SOURCES CONFIGURE_DEPENDS "src/recomp/gen_ntsc/*.c")
+    set(ntsc_dir "${CMAKE_CURRENT_BINARY_DIR}/ntsc_src")
+    set(ntsc_pal_xbe "")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../game/default.xbe")
+        set(ntsc_pal_xbe --pal "${CMAKE_CURRENT_SOURCE_DIR}/../game/default.xbe")  # flags mid-instruction literals
+    endif()
+    # every game source compiled into hpps_pal.dll that may hold an address, plus the renderer's settings file
+    set(ntsc_translate ${GAME_SOURCES} src/scda/app/app.cpp)
+    if(HPPS_DIFFTEST)
+        list(APPEND ntsc_translate src/difftest.c src/difftest_hle.h)
+    endif()
+    set(ntsc_sources "")
+    foreach(rel IN LISTS ntsc_translate)
+        set(out "${ntsc_dir}/${rel}")
+        add_custom_command(OUTPUT "${out}"
+            COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tools/edition/pal2ntsc.py" translate
+                    "${HPPS_EDITION_MAP}" ${ntsc_pal_xbe} --rules "${CMAKE_CURRENT_SOURCE_DIR}/tools/edition/rules.txt"
+                    --strict --quiet --root "${CMAKE_CURRENT_SOURCE_DIR}" --out-dir "${ntsc_dir}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/${rel}"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${rel}" "${HPPS_EDITION_MAP}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tools/edition/rules.txt"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tools/edition/pal2ntsc.py"
+            COMMENT "pal2ntsc ${rel}" VERBATIM)
+        list(APPEND ntsc_sources "${out}")
+    endforeach()
+    set(HPPS_PRODUCT "Harry Potter and the Sorcerer's Stone - unofficial PC port")
+    hpps_version_rc(HPPS_RC_VERSION_NTSC "hpps_ntsc.dll")
+    file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/hpps_ntsc_res.rc"
+         CONTENT "// generated by CMakeLists.txt\n${HPPS_RC_VERSION_NTSC}")
+    if(WIN32)
+        # a DLL as hpps_pal.dll is (above), loaded by the same hpps.exe
+        add_library(hpps_ntsc SHARED ${ntsc_sources} ${RECOMP_GEN_NTSC_SOURCES}
+                    "${CMAKE_CURRENT_BINARY_DIR}/hpps_ntsc_res.rc")
+        set_target_properties(hpps_ntsc PROPERTIES PREFIX "" OUTPUT_NAME hpps_ntsc
+                              RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin")
+        target_link_options(hpps_ntsc PRIVATE -Wl,--image-base=0x150000000)
+        add_dependencies(hpps hpps_ntsc)
+    else()
+        add_executable(hpps_ntsc ${ntsc_sources} ${RECOMP_GEN_NTSC_SOURCES})
+    endif()
+    add_dependencies(hpps_ntsc hpps_build_info)
+    target_compile_definitions(hpps_ntsc PRIVATE HPPS_NTSC=1)
+    target_link_libraries(hpps_ntsc PRIVATE xboxrecomp)
+    target_include_directories(hpps_ntsc PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/src/recomp ${XBOXRECOMP_DIR}/include)
+    set_source_files_properties("${ntsc_dir}/src/main.c" PROPERTIES
+        COMPILE_DEFINITIONS "HPPS_VERSION_STR=\"${HPPS_VERSION}\";HPPS_BUILD_KIND=\"${hpps_build_kind}\""
+        INCLUDE_DIRECTORIES "${CMAKE_CURRENT_BINARY_DIR}")
+    if(WIN32)
+        if(HPPS_RELEASE)
+            set_source_files_properties(${RECOMP_GEN_NTSC_SOURCES} PROPERTIES COMPILE_OPTIONS
+                "-O2;-fno-stack-protector;-U_FORTIFY_SOURCE")
+        else()
+            set_source_files_properties(${RECOMP_GEN_NTSC_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2")
+        endif()
+        if(Python3_FOUND)
+            add_custom_command(TARGET hpps_ntsc POST_BUILD
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_tls_refs.py
+                        --objdump ${CMAKE_OBJDUMP} --nm ${CMAKE_NM} $<TARGET_FILE:hpps_ntsc>
+                VERBATIM)
+        endif()
+        # the renderer, the same files as hpps_pal.dll's (app.cpp translated above)
+        target_sources(hpps_ntsc PRIVATE
+            src/scda/gpu/d3d12.cpp src/scda/gpu/pipeline_cache.cpp src/scda/gpu/render_thread.cpp
+            src/scda/gpu/shaders.cpp src/scda/gpu/texture.cpp src/scda/gpu/vertex.cpp
+            src/scda/app/menu.cpp src/scda/app/input.cpp
+            ${IMGUI_DIR}/imgui.cpp ${IMGUI_DIR}/imgui_draw.cpp ${IMGUI_DIR}/imgui_tables.cpp
+            ${IMGUI_DIR}/imgui_widgets.cpp ${IMGUI_DIR}/backends/imgui_impl_win32.cpp
+            ${IMGUI_DIR}/backends/imgui_impl_dx12.cpp)
+        set_source_files_properties("${ntsc_dir}/src/scda/xdk/hle_d3d8.cpp" "${ntsc_dir}/src/scda/app/app.cpp"
+            PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/scda;${XBOXRECOMP_DIR}/src;${IMGUI_DIR}"
+            COMPILE_OPTIONS "-msse4.1")
+        set_target_properties(hpps_ntsc PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+        target_link_options(hpps_ntsc PRIVATE -static -static-libgcc -static-libstdc++)
+        target_link_libraries(hpps_ntsc PRIVATE d3d11 d3d12 d3dcompiler dxgi dxguid xinput1_4 winmm dbghelp xaudio2_8
+                              ole32 imm32 dwmapi gdi32)
+    endif()
+    if(HPPS_CALL_PROFILE)
+        target_compile_definitions(hpps_ntsc PRIVATE RECOMP_CALL_PROFILE)
+    endif()
+    if(HPPS_DIFFTEST)
+        target_include_directories(hpps_ntsc PRIVATE third_party/unicorn)
+        target_compile_definitions(hpps_ntsc PRIVATE RECOMP_DIFFTEST)
+    endif()
 endif()
 
 # hpps_trainer.exe: the debug trainer beside the game (noclip, spells, health, saved spots); src/trainer/trainer.c,
@@ -286,4 +433,5 @@ if(WIN32)
     target_compile_options(hpps_trainer PRIVATE -O2)
     target_link_options(hpps_trainer PRIVATE -static -static-libgcc -mwindows)
     target_link_libraries(hpps_trainer PRIVATE comctl32 gdi32 user32)
+    set_target_properties(hpps_trainer PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin")
 endif()

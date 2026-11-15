@@ -73,11 +73,16 @@ struct Settings {
     bool bloom = false;
     uint32_t bloom_strength = 40;      // 0 to 100
     uint32_t sharpen = 0;              // 0 (off) to 100
+    bool skip_intro = false;           // xboxrecomp: the Warner Bros. and EA logo movies at start not played (hle_video.c)
     bool bean_names = true;            // xboxrecomp: a bean's flavour shown on the screen as Harry picks it up (hle_trainer.c)
+    bool free_camera = true;           // xboxrecomp: the camera stick's up / down tilt the play camera (hle_camera.c);
+                                       // false: they step the console's zoom
     uint32_t speakers = 2;             // xboxrecomp: 2 stereo, 6 5.1 surround (hle_dsound.c, at start)
     uint32_t language = 0;             // xboxrecomp: the language the game starts in: 0 English, 1 French, 2 German,
                                        // 3 Spanish, 4 Italian, 5 Dutch, 6 Swedish (RECOMP_LANGUAGE, hle_frontend.c)
     bool kbm = true;                   // keyboard and mouse drive pad 1 alongside a controller
+    uint32_t button_prompts = 0;       // xboxrecomp: 0 automatic (the device used last), 1 controller buttons, 2 keys
+                                       // (d3d12.cpp's PromptLookup draws the game's button pictures as the bound keys)
     uint32_t mouse_sensitivity = 50;   // 1 to 100
     bool mouse_invert_y = false;
     uint32_t deadzone_left = 10, deadzone_right = 10;          // % of full tilt read as centred
@@ -94,6 +99,8 @@ struct Settings {
 
 Settings& Get();
 void Save();
+// xboxrecomp: Button prompts: the game's button pictures drawn as the bound keys now (input.cpp)
+bool PromptsKbmNow();
 // xboxrecomp: the movement keys' paces (input.cpp tunes the keys' push to each; the mouse wheel steps them), as in
 // HP:CoS, with HP:PS's own three: sneak, walk, run
 enum MoveMode : uint32_t { kMoveSneak, kMoveWalk, kMoveRun, kMoveModes };

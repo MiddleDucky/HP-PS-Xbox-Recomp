@@ -644,6 +644,9 @@ extern "C" volatile int64_t hpps_last_swap_qpc = 0;
 static std::atomic<int> g_hud_trace{0};  // xboxrecomp debug: HudTrace, F12
 static uint32_t g_hud_n = 0;
 
+// xboxrecomp: hle_frontend.c's copies of the game's texts with buttons follow the device and the bindings
+extern "C" void hpps_PromptRefresh(void);
+
 // xboxrecomp: the debug trainer's report asks for an F12 capture of the next frame (hle_trainer.c)
 extern "C" void hpps_RequestCapture(void) { gpu::g_capture = true; }
 
@@ -660,6 +663,7 @@ extern "C" void hle_d3d8_overlay_present(void) {
 
 HLE(0019E390, 1) {
     g_last_swap_ms.store(GetTickCount64());
+    hpps_PromptRefresh();
     {   // xboxrecomp debug: F12 down starts a [HUD] trace of the next frame, this Swap ends one
         static bool was_down;
         // Insert as well: some desktops and terminals keep F12 for themselves

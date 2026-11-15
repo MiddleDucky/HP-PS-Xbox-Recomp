@@ -66,9 +66,12 @@ int xbox_FramebufferKeyDown(int vk);
 void xbox_FramebufferWindowStart(void);
 void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch);
 int  xbox_FramebufferDumpBmp(const char *path);
-/* Title bar: "<XBE title> | FPS: n | draws: n". The name is the certificate's
- * UTF-16 title (40 chars max); the stats come from each flip. */
+/* Title bar: "(XBOX Recomp) <game name>". SetGameName (UTF-8, from the port, at
+ * start) wins; otherwise SetTitle gives the XBE certificate's UTF-16 title
+ * (40 chars max), ignored when empty; with neither, "Xbox Recomp".
+ * FrameStats is kept for its callers and shows nothing. */
 void xbox_FramebufferWindowSetTitle(const uint16_t *name, int max_chars);
+void xbox_FramebufferWindowSetGameName(const char *utf8);
 void xbox_FramebufferWindowFrameStats(uint32_t draws);
 /* The NV2A video overlay (PVIDEO), which the CRTC mixes over the framebuffer
  * at scan-out: XMV movies are shown this way, not drawn into the framebuffer.

@@ -1,13 +1,15 @@
 # Harry Potter and the Philosopher's Stone (PAL/NTSC) — Xbox to PC port
 
-A native Windows port of the original Xbox game *Harry Potter and the Philosopher's Stone* (2003), made by
+A native Windows port of the original Xbox game *Harry Potter and the Philosopher's Stone* (2003), the PAL disc, and its NTSC-US release *Harry Potter and the
+Sorcerer's Stone*, made by
 **static recompilation**: the game's x86 code is translated to C and compiled for Windows, with the Xbox kernel,
 Direct3D 8, DirectSound and input replaced by native code. No emulator.
 
 Features beyond the original: resolutions up to 4K with MSAA/SMAA and anisotropic filtering, true 16:9
 (widened 3D, 2D kept in shape), windowed/borderless/fullscreen, keyboard and mouse with rebinding, controller
-remapping, deadzones and vibration strength, colour-blind correction filters, a 30 fps cap or unlocked frame
-rate, and "Quit To Desktop" in the game's menus.
+remapping, deadzones and vibration strength, keyboard button prompts, a free camera that tilts up and down,
+colour-blind correction filters, a 30 fps cap or unlocked frame rate, and "PC Settings" and "Quit To Desktop" in
+the game's menus.
 
 **This repository contains no game content.** To play or build it you need the files from your own copy of the
 Xbox disc. The build regenerates the recompiled code from your `default.xbe`.

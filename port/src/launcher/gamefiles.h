@@ -1,5 +1,5 @@
 // gamefiles.h - checking the game folder against the known-good list of the disc's files (gamefiles.c,
-// game_files.inc from tools/make_game_files.py), for hpps_launcher.exe
+// game_files_pal.inc / game_files_ntsc.inc from tools/make_game_files.py), for hpps_launcher.exe
 #pragma once
 #include <windows.h>
 
@@ -8,6 +8,16 @@ extern "C" {
 #endif
 
 enum { GAMEFILE_OK, GAMEFILE_MISSING, GAMEFILE_SIZE, GAMEFILE_CONTENT };
+
+// The editions the port runs: the PAL (Europe) Philosopher's Stone (hpps_pal.dll) and the NTSC-US Sorcerer's Stone
+// (hpps_ntsc.dll), both loaded by hpps.exe. NONE: no default.xbe; OTHER: one that is neither.
+enum { GAME_EDITION_NONE, GAME_EDITION_OTHER, GAME_EDITION_PAL, GAME_EDITION_NTSC };
+
+// dir\default.xbe's edition, from its header
+int gamefiles_DetectEdition(const WCHAR* dir);
+// the list the calls below use: NTSC-US's, otherwise PAL's (the default)
+void gamefiles_SetEdition(int edition);
+int gamefiles_Edition(void);  // GAME_EDITION_PAL or GAME_EDITION_NTSC
 
 #define GAMEFILES_LISTED 32  // the files named in a report; the counts cover all of them
 
