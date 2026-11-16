@@ -4009,7 +4009,12 @@ bool RegisterFirst(const Assembled& a, int r, float out[2]) {
 // shown wide, Present fills the screen with it, so its 2D (the subtitles, in the lower bar) is drawn into the picture
 // at the size it has on screen otherwise, and its HUD is left out (returns true: the draw is skipped). Elsewhere Present shows the title's viewport, leaving out the rows of TV
 // overscan above and below it (black lines on a PC), and as much off the sides to keep the shape.
-static std::unordered_set<uint32_t> spun;  // textures seen as turned quads (the aiming circle)
+// textures seen as turned quads (the aiming circle), with when they last were. Issue #24: kept for good, one turned
+// draw of the HUD's button wheel (or a spun texture's header reused for it after a load) made every later wheel
+// draw a mark: its four buttons kept their 4:3 places, spread out and left of their spell icons, for the rest of
+// the session. The circle spins all the while it shows, so an upright draw is a mark only shortly after a turned one
+static std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> spun;
+constexpr auto kSpunFor = std::chrono::milliseconds(1000);
 extern "C" int hpps_MenuMovie(void);  // hle_video.c: the main menu's background movie is playing
 extern "C" int hpps_LoadingScreen(void);  // hle_video.c: the loading screen's thread is drawing
 extern "C" int hpps_LoadingCount(void);   // hle_video.c: loading screens so far
@@ -4080,8 +4085,19 @@ bool Squeeze2D(const State& s, const Assembled& a, const DrawShaders& sh, uint32
                 // the aiming circle spins through upright too (a frame now and then of its lock-on): a texture once
                 // seen turned stays a mark, or that frame would go with the HUD's side and show beside the target
                 if (s.textures[0]) {
-                    if (marker) spun.insert(s.textures[0]);
-                    else if (spun.count(s.textures[0])) marker = true;  // upright it is ~6% wider than tall
+                    const auto now = std::chrono::steady_clock::now();
+                    if (marker) {
+                        auto [it, added] = spun.insert_or_assign(s.textures[0], now);
+                        static uint32_t told;
+                        if (added && told < 32) {
+                            told++;
+                            fprintf(stderr, "[WIDE] turned quad, a mark on the scene: t0 %08X rect %.0f %.0f %.0f %.0f\n",
+                                    s.textures[0], r[0], r[1], r[2], r[3]);
+                        }
+                    } else if (auto it = spun.find(s.textures[0]); it != spun.end()) {
+                        if (now - it->second <= kSpunFor) marker = true;  // upright it is ~6% wider than tall
+                        else spun.erase(it);
+                    }
                 }
             }
         } else if (!flat) {
