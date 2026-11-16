@@ -166,6 +166,47 @@ void sub_00036AF0(void)
     for (int i = 0; i < FOG_COUNT * 2; i++) MEMF(FOG_VEL + 4 * i) = vel[i];
 }
 
+/*
+ * The aiming reticle (issue #22): sub_00012EB0 places the circle round the locked target (the player controller's
+ * +0x2564) with a turn of 0x32036C radians and then adds 0.05 to the turn, once per call and with no time step.
+ * The player and camera update, sub_00017180, calls it once a frame (from one of two branches), so the circle spun
+ * as fast as frames came: unlocked many times too fast, and still turning behind the pause menu. It now turns by
+ * 0.05 per 1/59.94 s of real time, the speed it has at 60 fps (3 rad/s), whatever the frame rate. Each call site
+ * keeps its own clock, so the two branches never share a frame's time. A long gap (the circle just shown again) is
+ * one step, as before.
+ */
+#define RETICLE_TURN 0x0032036Cu
+
+extern void sub_00012EB0_gen(void);
+void sub_00012EB0(void)
+{
+    static LARGE_INTEGER freq;
+    static struct { uint32_t ret; LARGE_INTEGER last; } site[2];
+    const uint32_t ret = MEM32(g_esp);
+    const float before = MEMF(RETICLE_TURN);
+    LARGE_INTEGER now;
+    double dt, k;
+    int i;
+
+    sub_00012EB0_gen();
+    const float step = MEMF(RETICLE_TURN) - before;
+    if (step == 0.0f) return;  /* no target: nothing turned */
+
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    for (i = 0; i < 2 && site[i].ret && site[i].ret != ret; i++) {}
+    if (i == 2) i = 1;
+    dt = site[i].ret == ret && site[i].last.QuadPart
+             ? (double)(now.QuadPart - site[i].last.QuadPart) / (double)freq.QuadPart
+             : 0.0;
+    site[i].ret = ret;
+    site[i].last = now;
+    if (dt <= 0.0 || dt > 0.25) return;  /* first turn after a gap: the game's one step */
+    k = dt * 60000.0 / 1001.0;           /* in 60 fps frames */
+    if (k > 4.0) k = 4.0;
+    MEMF(RETICLE_TURN) = (float)(before + step * k);
+}
+
 extern void sub_000BA050_gen(void);
 void sub_000BA050(void)
 {
