@@ -4184,6 +4184,10 @@ bool Squeeze2D(const State& s, const Assembled& a, const DrawShaders& sh, uint32
                         s.textures[0], td.format, td.width, td.height, SimpleState(s, kMBlendEnable), r[0], r[1], r[2], r[3],
                         wf.scene, int(wf.wiped));
         }
+        // a blended picture over the whole frame is a screen effect over whatever is up, not a menu's backdrop (all
+        // of those, the title's, the movie, the loading screens, are opaque): the invisibility cloak's 256x256 tint,
+        // also over the inventory, where as a backdrop it kept the inventory's mist to 4:3 (2026-11-17)
+        if (SimpleState(s, kMBlendEnable)) return false;
         wf.backdrop = true;
         // the main menu's moving background (frontend.xmv, a 640x480 YUY2 frame) and the loading screen: the full
         // 16:9 width, their middle 360 lines (4/3 as tall about the middle) instead of the 4:3 picture between bars
