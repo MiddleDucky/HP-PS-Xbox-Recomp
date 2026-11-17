@@ -4126,7 +4126,20 @@ bool Squeeze2D(const State& s, const Assembled& a, const DrawShaders& sh, uint32
             const float vt = float(s.viewport.y), vb = float(s.viewport.y + s.viewport.h);
             // an opaque fill over the whole frame hides the scene drawn so far: a menu over it (the Remembrall's,
             // under its fog); the game's fades blend
-            if (r[1] <= vt + 1.0f && r[3] >= vb - 1.0f && !SimpleState(s, kMBlendEnable)) wf.scene = 0, wf.wiped = true;
+            // Only a fill that paints colour everywhere: the invisibility cloak's pass over the frame (2026-11-17: the
+            // HUD and the inventory went 4:3 while Harry wore it, "opaque fill 1") writes only some of the channels
+            // or only where the stencil lets it, and the scene stays in view
+            if (r[1] <= vt + 1.0f && r[3] >= vb - 1.0f && !SimpleState(s, kMBlendEnable)) {
+                const uint32_t cw = SimpleState(s, kMColorWriteEnable);
+                const bool paints = (cw & 0x00010101u) == 0x00010101u && !s.rs[kRsStencilEnable];
+                static std::set<uint64_t> told;  // each kind of fill once
+                const uint64_t key = uint64_t(cw) << 8 | uint64_t(s.rs[kRsStencilEnable] != 0) << 1 | (s.rs[kRsZEnable] != 0);
+                if (told.size() < 16 && told.insert(key).second)
+                    fprintf(stderr, "[WIDE] opaque fill over the frame: colour writes %08X stencil %u z %u%s -> %s (scene draws %u)\n",
+                            cw, s.rs[kRsStencilEnable], s.rs[kRsZEnable], LiveScene(wf) ? " over gameplay" : "",
+                            paints ? "hides the scene" : "scene stays", wf.scene);
+                if (paints) wf.scene = 0, wf.wiped = true;
+            }
             if (r[3] - r[1] < fh * 0.25f && (r[1] <= vt + 1.0f || r[3] >= vb - 1.0f)) {
                 wf.bars = true;
                 wf.bars_h += r[3] - r[1];
@@ -4163,6 +4176,14 @@ bool Squeeze2D(const State& s, const Assembled& a, const DrawShaders& sh, uint32
         }
         // over the scene (gameplay, a cutscene) a picture across the frame is a screen effect: left as drawn
         if (LiveScene(wf)) return false;
+        {   // which pictures across the frame made a backdrop (a menu): each texture once
+            static std::set<uint32_t> told;
+            TextureDesc td;
+            if (told.size() < 64 && told.insert(s.textures[0]).second && Describe(s.textures[0], td))
+                fprintf(stderr, "[WIDE] picture across the frame, a backdrop: t0 %08X format %02X %ux%u blend %u rect %.0f %.0f %.0f %.0f (scene draws %u, fill %d)\n",
+                        s.textures[0], td.format, td.width, td.height, SimpleState(s, kMBlendEnable), r[0], r[1], r[2], r[3],
+                        wf.scene, int(wf.wiped));
+        }
         wf.backdrop = true;
         // the main menu's moving background (frontend.xmv, a 640x480 YUY2 frame) and the loading screen: the full
         // 16:9 width, their middle 360 lines (4/3 as tall about the middle) instead of the 4:3 picture between bars
