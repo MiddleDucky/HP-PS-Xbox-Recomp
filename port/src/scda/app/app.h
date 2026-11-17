@@ -41,7 +41,7 @@ struct Settings {
     AspectMode aspect = AspectMode::Standard;  // RECOMP_ASPECT; read at boot, the title picks its camera then
     uint32_t internal_height = 0;      // RECOMP_INTERNAL_HEIGHT: 3D render lines, 0 follows the window
     uint32_t render_percent = 100;     // RECOMP_RENDER_PERCENT, of the window height
-    uint32_t render_max_height = 1080; // RECOMP_RENDER_MAX_HEIGHT, 0 no cap
+    uint32_t render_max_height = 0;    // RECOMP_RENDER_MAX_HEIGHT (toml render_height_limit), 0 no cap
     uint32_t brightness = 50;          // 0 to 100, 50 each leaves the picture alone
     uint32_t contrast = 50;
     bool fps_counter = false;

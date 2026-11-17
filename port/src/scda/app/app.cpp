@@ -58,7 +58,7 @@ const Entry kEntries[] = {
      "internal resolution: lines the 3D is drawn at (480 is the Xbox's, 960 2x, 1440 3x, 2160 4.5x); 0 follows the window"},
     {"render_percent", "RECOMP_RENDER_PERCENT", Kind::U32, FIELD(render_percent), 25, 400,
      "with internal_height 0: the render height as % of the window's"},
-    {"render_max_height", "RECOMP_RENDER_MAX_HEIGHT", Kind::U32, FIELD(render_max_height), 0, 8640,
+    {"render_height_limit", "RECOMP_RENDER_MAX_HEIGHT", Kind::U32, FIELD(render_max_height), 0, 8640,
      "with internal_height 0: the most lines it follows the window to, 0 no limit"},
     {"msaa", "RECOMP_MSAA", Kind::U32, FIELD(msaa), 0, 8, "multisample anti-aliasing: 0 off, 2, 4 or 8 samples"},
     {"smaa", "RECOMP_SMAA", Kind::Bool, FIELD(smaa), 0, 0,
@@ -457,7 +457,8 @@ float RenderScale(uint32_t guest_height) {
         GetClientRect(static_cast<HWND>(Window()), &rc);
         uint32_t h = std::max<LONG>(rc.bottom - rc.top, 1);
         lines = float(h) * s.render_percent / 100.0f;
-        // a maximised window on a 4K screen would otherwise render ~2100 lines; past the cap the frame is upscaled
+        // only a cap the player set (none by default, so Internal resolution alone decides); past it the frame is upscaled. The
+        // toml key was render_max_height = 1080 (from the renderer project): renamed so saved files drop that cap
         if (s.render_max_height) lines = std::min(lines, float(s.render_max_height));
     }
     return std::max(1.0f, lines / float(std::max<uint32_t>(guest_height, 1)));
