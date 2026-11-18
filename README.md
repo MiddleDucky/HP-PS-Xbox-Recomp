@@ -5,6 +5,10 @@ Sorcerer's Stone*, made by
 **static recompilation**: the game's x86 code is translated to C and compiled for Windows, with the Xbox kernel,
 Direct3D 8, DirectSound and input replaced by native code. No emulator.
 
+**Please note: This is not by any means completed work. I'm still actively working on this and do appreciate any feedback that will make this project better.
+As such, while the games are playing from start to finish with no crashes (hopefully) some issues may arise (missing lighting, 4:3 buttons instead of 16:9 etc.). 
+If you do notice something that doesn't look right, please raise it as an issue and I'll be more than happy to fix it.**
+
 Features beyond the original: resolutions up to 4K with MSAA/SMAA and anisotropic filtering, true 16:9
 (widened 3D, 2D kept in shape), windowed/borderless/fullscreen, keyboard and mouse with rebinding, controller
 remapping, deadzones and vibration strength, keyboard button prompts, a free camera that tilts up and down,
