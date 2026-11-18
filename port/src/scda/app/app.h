@@ -77,6 +77,10 @@ struct Settings {
     bool bean_names = true;            // xboxrecomp: a bean's flavour shown on the screen as Harry picks it up (hle_trainer.c)
     bool free_camera = true;           // xboxrecomp: the camera stick's up / down tilt the play camera (hle_camera.c);
                                        // false: they step the console's zoom
+    bool free_look = true;             // xboxrecomp: the first-person look (White) turns with the stick and stays,
+                                       // all the way round (hle_camera.c); false: the console's 40 degrees, springing back
+    bool look_toggle = true;           // xboxrecomp: White starts and stops the first-person look (hle_camera.c); false:
+                                       // held, as the console
     uint32_t speakers = 2;             // xboxrecomp: 2 stereo, 6 5.1 surround (hle_dsound.c, at start)
     uint32_t language = 0;             // xboxrecomp: the language the game starts in: 0 English, 1 French, 2 German,
                                        // 3 Spanish, 4 Italian, 5 Dutch, 6 Swedish (RECOMP_LANGUAGE, hle_frontend.c)
@@ -87,6 +91,7 @@ struct Settings {
     bool mouse_invert_y = false;
     uint32_t deadzone_left = 10, deadzone_right = 10;          // % of full tilt read as centred
     uint32_t sensitivity_left = 100, sensitivity_right = 100;  // % response past the deadzone
+    uint32_t stick_camera_speed = 250;  // % of the game's camera turn at the right stick's full tilt (as the mouse's boost)
     bool invert_x = false, invert_y = false;                   // the camera (right stick and mouse)
     bool vibration = true;
     uint32_t vibration_strength = 100;  // %

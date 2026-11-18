@@ -245,6 +245,7 @@ void sub_001F5044(void)
 
 extern int hpps_MenuOpen(void);  /* scda/app/menu.cpp */
 extern void app_InputPad(int port, XBOX_GAMEPAD *g);  /* scda/app/input.cpp */
+extern uint8_t hpps_LookWhite(uint8_t white);  /* hle_camera.c: White as the first-person look's switch */
 
 /* Stick range compensation (RECOMP_STICK_RANGE, default 0.65; 1 = off).
  *
@@ -300,6 +301,8 @@ static void get_state_direct(void)
         app_InputPad((int)g_h[h].port, &s.Gamepad);
         stick_compensate(&s.Gamepad.sThumbLX, &s.Gamepad.sThumbLY);
         stick_compensate(&s.Gamepad.sThumbRX, &s.Gamepad.sThumbRY);
+        /* White as a switch for the first-person look (hle_camera.c) */
+        if (g_h[h].port == 0) s.Gamepad.bAnalogButtons[XBOX_BUTTON_WHITE] = hpps_LookWhite(s.Gamepad.bAnalogButtons[XBOX_BUTTON_WHITE]);
         hpps_last_pad = s.Gamepad;
         /* the packet number moves only when something changed, as XAPI's does */
         if (memcmp(&s.Gamepad, &g_h[h].last, sizeof(s.Gamepad))) g_h[h].packet++;

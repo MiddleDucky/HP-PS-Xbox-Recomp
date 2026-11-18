@@ -244,6 +244,9 @@ void DrawControls(Settings& s) {
     if (ImGui::IsItemDeactivatedAfterEdit()) Changed();
     if (ImGui::SliderInt("Right stick sensitivity %", &sr, 25, 200)) s.sensitivity_right = uint32_t(sr);
     if (ImGui::IsItemDeactivatedAfterEdit()) Changed();
+    int cs = int(s.stick_camera_speed);
+    if (ImGui::SliderInt("Controller camera speed %", &cs, 100, 400)) s.stick_camera_speed = uint32_t(cs);
+    if (ImGui::IsItemDeactivatedAfterEdit()) Changed();
     if (ImGui::Checkbox("Invert camera X", &s.invert_x)) Changed();
     ImGui::SameLine();
     if (ImGui::Checkbox("Invert camera Y", &s.invert_y)) Changed();
@@ -327,6 +330,7 @@ static void ResetPage(Settings& s, const char* page) {
         std::memcpy(&s.pad_map, &d.pad_map, sizeof(s.pad_map));
         std::memcpy(&s.sensitivity_left, &d.sensitivity_left, sizeof(s.sensitivity_left));
         std::memcpy(&s.sensitivity_right, &d.sensitivity_right, sizeof(s.sensitivity_right));
+        std::memcpy(&s.stick_camera_speed, &d.stick_camera_speed, sizeof(s.stick_camera_speed));
         std::memcpy(&s.sneak_pad, &d.sneak_pad, sizeof(s.sneak_pad));
         std::memcpy(&s.vibration, &d.vibration, sizeof(s.vibration));
         std::memcpy(&s.vibration_strength, &d.vibration_strength, sizeof(s.vibration_strength));
@@ -339,6 +343,8 @@ static void ResetPage(Settings& s, const char* page) {
         std::memcpy(&s.cutscene_bars, &d.cutscene_bars, sizeof(s.cutscene_bars));
         std::memcpy(&s.bean_names, &d.bean_names, sizeof(s.bean_names));
         std::memcpy(&s.free_camera, &d.free_camera, sizeof(s.free_camera));
+        std::memcpy(&s.free_look, &d.free_look, sizeof(s.free_look));
+        std::memcpy(&s.look_toggle, &d.look_toggle, sizeof(s.look_toggle));
         std::memcpy(&s.skip_intro, &d.skip_intro, sizeof(s.skip_intro));
     }
     if (!std::strcmp(page, "Debug")) {
@@ -544,13 +550,18 @@ void DrawPanel(bool start) {
         if (ImGui::Checkbox("Free camera", &s.free_camera)) Changed();
         ImGui::TextDisabled("The right stick's or mouse's up and down tilt the camera up and down round Harry.");
         ImGui::TextDisabled("Off: they move the camera nearer and further, as on the console.");
+        if (ImGui::Checkbox("Free first-person look", &s.free_look)) Changed();
+        ImGui::TextDisabled("The look (White) turns with the stick and stays where you leave it, all the way round.");
+        ImGui::TextDisabled("Off: it follows the stick up to 40 degrees and springs back, as on the console.");
+        if (ImGui::Checkbox("White switches the look on and off", &s.look_toggle)) Changed();
+        ImGui::TextDisabled("Press White to look, White again to stop. Off: hold it, as on the console.");
         // xboxrecomp: moved from Graphics (2026-11-10), worded as the PoA and CoS ports' (the setting is still
         // cutscene_bars, true keeping the bars, so hpps.toml reads as before)
         Row("Cutscenes");
         bool no_bars = !s.cutscene_bars;
         if (ImGui::Checkbox("Cutscenes without black bars", &no_bars)) s.cutscene_bars = !no_bars, Changed();
-        ImGui::TextDisabled("In 16:9 cutscenes fill the screen with no bars at the top and bottom (subtitles over the");
-        ImGui::TextDisabled("picture). Off: the console's bars over the picture.");
+        ImGui::TextDisabled("Cutscenes show with no bars at the top and bottom, the same shot uncropped (subtitles");
+        ImGui::TextDisabled("over the picture). Off: the console's bars over the picture.");
         Row("Startup");
         if (ImGui::Checkbox("Skip the Warner Bros. and EA logos", &s.skip_intro)) Changed();
         ImGui::TextDisabled("The logo movies before the title screen are not played. Off: played, as on the console.");
@@ -840,6 +851,8 @@ const GameRow kControlsRows[] = {
      [](Settings& s, int d) { s.deadzone_right = Stepped(s.deadzone_right, d, 0, 50, 1); }},
     {"Right sensitivity", [](const Settings& s) { return std::to_string(s.sensitivity_right); },
      [](Settings& s, int d) { s.sensitivity_right = Stepped(s.sensitivity_right, d, 25, 200, 5); }},
+    {"Controller camera speed", [](const Settings& s) { return std::to_string(s.stick_camera_speed); },
+     [](Settings& s, int d) { s.stick_camera_speed = Stepped(s.stick_camera_speed, d, 100, 400, 10); }},
     {"Invert camera X", [](const Settings& s) { return OnOff(s.invert_x); },
      [](Settings& s, int) { s.invert_x = !s.invert_x; }},
     {"Invert camera Y", [](const Settings& s) { return OnOff(s.invert_y); },
@@ -866,6 +879,10 @@ const GameRow kEnhanceRows[] = {
      [](Settings& s, int) { s.bean_names = !s.bean_names; }},
     {"Free camera", [](const Settings& s) { return OnOff(s.free_camera); },
      [](Settings& s, int) { s.free_camera = !s.free_camera; }},
+    {"Free first-person look", [](const Settings& s) { return OnOff(s.free_look); },
+     [](Settings& s, int) { s.free_look = !s.free_look; }},
+    {"White toggles look", [](const Settings& s) { return OnOff(s.look_toggle); },
+     [](Settings& s, int) { s.look_toggle = !s.look_toggle; }},
     {"Cutscene bars", [](const Settings& s) { return std::string(s.cutscene_bars ? "Shown" : "Hidden"); },
      [](Settings& s, int) { s.cutscene_bars = !s.cutscene_bars; }},
     {"Skip logo movies", [](const Settings& s) { return OnOff(s.skip_intro); },

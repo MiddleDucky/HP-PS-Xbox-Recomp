@@ -72,7 +72,8 @@ const Entry kEntries[] = {
     {"skip_intro", "RECOMP_SKIP_INTRO", Kind::Bool, FIELD(skip_intro), 0, 0,
      "the Warner Bros. and EA logo movies at start skipped; false: played, as the console does"},
     {"cutscene_bars", nullptr, Kind::Bool, FIELD(cutscene_bars), 0, 0,
-     "16:9: cutscenes fill the screen and keep the console's black bars over the picture (subtitles in the bottom one)"},
+     "cutscenes keep the console's black bars over the picture (subtitles in the bottom one); false: no bars, the same "
+     "uncropped shot"},
     {"debug_logs", "RECOMP_DEBUG_LOGS", Kind::Bool, FIELD(debug_logs), 0, 0,
      "extra traces in the run log (speech and the like), from the next start (F10 > Debug). The logs themselves are "
      "always written: logs\\runs\\hpps_run_<date_time>.log and xbox_kernel_<date_time>.log, the newest 10 runs kept"},
@@ -100,6 +101,11 @@ const Entry kEntries[] = {
     {"free_camera", "RECOMP_FREE_CAMERA", Kind::Bool, FIELD(free_camera), 0, 0,
      "the camera stick's (and the mouse's) up and down tilt the camera up and down round Harry; false: they move it "
      "nearer and further, as the console does"},
+    {"free_look", "RECOMP_FREE_LOOK", Kind::Bool, FIELD(free_look), 0, 0,
+     "the first-person look (White) turns with the stick and stays where it is left, all the way round; false: it "
+     "follows the stick up to 40 degrees and springs back, as the console does"},
+    {"look_toggle", "RECOMP_LOOK_TOGGLE", Kind::Bool, FIELD(look_toggle), 0, 0,
+     "White starts the first-person look and White again stops it; false: held, as the console does"},
     {"keyboard_mouse", nullptr, Kind::Bool, FIELD(kbm), 0, 0,
      "keyboard and mouse play as controller 1, alongside a pad (key names below; Mouse1-5 the mouse buttons)"},
     {"button_prompts", nullptr, Kind::U32, FIELD(button_prompts), 0, 2,
@@ -116,6 +122,8 @@ const Entry kEntries[] = {
     {"deadzone_right", nullptr, Kind::U32, FIELD(deadzone_right), 0, 50, nullptr},
     {"sensitivity_left", nullptr, Kind::U32, FIELD(sensitivity_left), 25, 200, nullptr},
     {"sensitivity_right", nullptr, Kind::U32, FIELD(sensitivity_right), 25, 200, nullptr},
+    {"stick_camera_speed", nullptr, Kind::U32, FIELD(stick_camera_speed), 100, 400,
+     "100 to 400, the camera's turning speed with the right stick in % of the game's (the mouse goes up to 400)"},
     {"invert_camera_x", nullptr, Kind::Bool, FIELD(invert_x), 0, 0, nullptr},
     {"invert_camera_y", nullptr, Kind::Bool, FIELD(invert_y), 0, 0, nullptr},
     {"vibration", nullptr, Kind::Bool, FIELD(vibration), 0, 0, nullptr},
@@ -507,6 +515,8 @@ std::recursive_mutex& UiLock() {
 // hle_dsound.c, when the mixer starts: output channels
 extern "C" int hpps_BeanNames(void) { return app::Get().bean_names; }
 extern "C" int hpps_FreeCamera(void) { return app::Get().free_camera; }  // hle_camera.c, the camera stick
+extern "C" int hpps_FreeLook(void) { return app::Get().free_look; }  // hle_camera.c, the first-person look
+extern "C" int hpps_LookToggle(void) { return app::Get().look_toggle; }  // hle_camera.c, White as a switch
 extern "C" int hpps_SkipIntro(void) { return app::Get().skip_intro; }  // hle_video.c, the movie player
 extern "C" uint32_t hpps_FovPercent(void) { return std::clamp<uint32_t>(app::Get().fov, 80, 130); }
 extern "C" int app_Speakers(void) { return app::Get().speakers == 6 ? 6 : 2; }

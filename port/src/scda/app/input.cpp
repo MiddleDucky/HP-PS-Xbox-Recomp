@@ -101,6 +101,11 @@ void Write(XBOX_GAMEPAD& g, const uint8_t v[kPadInputs]) {
 
 // the mouse's movement since the last read as a right stick tilt; read at most every 8 ms, so a title polling twice a
 // frame sees the same tilt both times rather than the movement and then nothing
+// the mouse's tilt of the last read before any cap: past 1 the camera turns faster than the stick's full tilt
+// (hle_camera.c reads it; 2026-11-16: 100 felt slow, the stick's full tilt was the most the mouse could ask for)
+float g_mouse_tilt_x, g_mouse_tilt_y;
+float g_pad_boost = 1.0f;  // the controller camera speed while the right stick turns the camera, else 1
+
 void MouseStick(const Settings& s, float* rx, float* ry) {
     static LARGE_INTEGER last{};
     static float sx, sy;
@@ -122,6 +127,7 @@ void MouseStick(const Settings& s, float* rx, float* ry) {
     }
     *rx = sx;
     *ry = s.mouse_invert_y ? -sy : sy;
+    g_mouse_tilt_x = *rx, g_mouse_tilt_y = *ry;
 }
 
 }  // namespace
@@ -338,6 +344,7 @@ extern "C" void app_InputPad(int port, XBOX_GAMEPAD* g) {
     if (!s.controller) std::memset(g, 0, sizeof(*g));  // xboxrecomp: "Use controller" off: the pad at rest
     uint8_t in[app::kPadInputs], out[app::kPadInputs];
     app::Read(*g, in);
+    if (port == 0) app::g_mouse_tilt_x = app::g_mouse_tilt_y = 0;  /* set again below only while the mouse plays */
     for (uint32_t i = 0; i < app::kPadInputs; i++) out[i] = in[std::min(s.pad_map[i], app::kPadInputs - 1)];
     // the sneak toggle's pad button is the toggle's only, not the game's too
     if (port == 0 && s.sneak_pad < app::kPadInputs) {
@@ -346,6 +353,8 @@ extern "C" void app_InputPad(int port, XBOX_GAMEPAD* g) {
     }
     app::Shape(&g->sThumbLX, &g->sThumbLY, s.deadzone_left, s.sensitivity_left);
     app::Shape(&g->sThumbRX, &g->sThumbRY, s.deadzone_right, s.sensitivity_right);
+    // the controller's camera speed past the game's (hle_camera.c, as the mouse's boost): while the right stick turns
+    if (port == 0) app::g_pad_boost = (g->sThumbRX || g->sThumbRY) ? s.stick_camera_speed / 100.0f : 1.0f;
     // Button prompts' Automatic: which device this read came from (the controller's before the keys go on top)
     bool pad_used = false, kbm_used = false;
     if (port == 0) {
@@ -371,6 +380,7 @@ extern "C" void app_InputPad(int port, XBOX_GAMEPAD* g) {
         rx += float(app::Held(s.keys[23])) - float(app::Held(s.keys[22]));
         ry += float(app::Held(s.keys[20])) - float(app::Held(s.keys[21]));
         if (rx || ry) {
+            app::g_pad_boost = 1.0f;  // the mouse or the camera keys turn it, not the stick
             float m = std::sqrt(rx * rx + ry * ry);
             if (m > 1.0f) rx /= m, ry /= m;
             g->sThumbRX = app::Clamp16(rx);
@@ -387,6 +397,15 @@ extern "C" void app_InputPad(int port, XBOX_GAMEPAD* g) {
         if (app::SneakOn()) app::SneakStick(&g->sThumbLX, &g->sThumbLY);
     }
     app::Write(*g, out);
+}
+
+// hle_camera.c: how far past the stick's full tilt the mouse asks the camera to turn (1 at most the stick's), X and Y
+// (or the controller camera speed while the right stick turns it)
+extern "C" float app_MouseBoostX(void) {
+    return std::min(4.0f, std::max(app::g_pad_boost, std::fabs(app::g_mouse_tilt_x)));
+}
+extern "C" float app_MouseBoostY(void) {
+    return std::min(4.0f, std::max(app::g_pad_boost, std::fabs(app::g_mouse_tilt_y)));
 }
 
 // hle_input.c: keyboard and mouse play as controller 1 (port 0 is there with no controller plugged in)
