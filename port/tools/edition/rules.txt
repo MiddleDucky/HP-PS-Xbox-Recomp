@@ -15,6 +15,8 @@ keep 0x50000
 keep 0x70000
 keep 0x80000
 keep 0xD0001
+# hle_anim.c [CIRCLE]: the top of the code range for return addresses on the stack (a bound, above .text in both)
+keep 0x1C0000
 # recomp_manual.c's commented-out example
 keep 0x12345
 # icall seed inside a function the disassembler bounds wrongly (sub_00080077); same address in NTSC

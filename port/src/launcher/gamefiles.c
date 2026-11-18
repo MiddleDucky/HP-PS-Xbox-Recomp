@@ -41,6 +41,9 @@ static const struct {
     GameFile f;
 } kAlso[] = {
     {GAME_EDITION_PAL, {"default.xbe", 3264512u, 0x3D0FF840u}},  // the retail DVD's, untouched (2026-11-01)
+    // NTSC-US retail, untouched: the list's copy with 0x144F29 (guest 0x154F29) back to jge 7D, SHA-256 54f278e0...;
+    // a player's launcher called it damaged (2026-11-16)
+    {GAME_EDITION_NTSC, {"default.xbe", 3264512u, 0xCA860F30u}},
 };
 
 static BOOL AlsoGood(int i, uint32_t crc) {
