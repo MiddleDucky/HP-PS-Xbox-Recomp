@@ -3108,9 +3108,11 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
         if (ts[kTssAddressV] == kTaddressBorderTex) info.flags |= kTexBorderV;
     }
 
-    // rendered by the GPU: sample the target itself; DXT data loaded over a target's memory is not it
+    // rendered by the GPU: sample the target itself; DXT or P8 data loaded over a target's memory is not it (no
+    // target is palettized; issue #18: from the second night on, the A button by "Continue" / "Select", a P8 sprite
+    // loaded where a target had been, showed that target's old picture in a black box. HP:GoF's fix)
     auto tit = targets_.find(TargetKey(d.data, fi.depth));
-    if (tit != targets_.end() && !d.cube && d.depth == 1 && !fi.compressed) {
+    if (tit != targets_.end() && !d.cube && d.depth == 1 && !fi.compressed && d.format != 0x0B) {
         return BindTargetTexture(s, stage, d, tit->second, stages);
     }
     uint32_t palette = 0;
@@ -3226,7 +3228,8 @@ bool D3D12Backend::BloomForScene(const State& s, const Assembled& a) {
     // a view drawn into a texture laid over the scene is not the HUD
     for (uint32_t tex : s.textures) {
         TextureDesc d;
-        if (tex && Describe(tex, d) && targets_.count(TargetKey(d.data, Format(d.format).depth))) return true;
+        if (tex && Describe(tex, d) && d.format != 0x0B && targets_.count(TargetKey(d.data, Format(d.format).depth)))
+            return true;  // (a P8 sprite over a former target's memory is the HUD: BindTexture)
     }
     SceneBloom(*t);
     return bound_rt_ == t || BindTargets(s);
@@ -4145,32 +4148,10 @@ bool Squeeze2D(const State& s, const Assembled& a, const DrawShaders& sh, uint32
                 wf.bars_h += r[3] - r[1];
                 if (wf.nbars < 2) std::memcpy(wf.bar_r[wf.nbars++], r, sizeof(wf.bar_r[0]));
                 wf.bar_area += (r[2] - r[0]) * (r[3] - r[1]);
-                // xboxrecomp: cutscene_bars: in a zoomed cutscene the bars are drawn where the zoom shows them, by
-                // the subtitles' mapping (the whole frame onto the band the zoom shows: they land at their original
-                // share of the screen's height) across the shown width. The title draws them after the picture and
-                // before the subtitles, so the subtitles stay on top, in the bottom bar as on the console.
-                if (wf.cut && !wf.bars_out && app::Get().cutscene_bars) {
-                    const float bvy = wf.vp_h > 0 ? wf.vp_y : wf.view_h > 0 ? wf.view_y : 0;
-                    const float bvh = wf.vp_h > 0 ? wf.vp_h : wf.view_h > 0 ? wf.view_h : fh;
-                    float cr[4];
-                    WideCrop(fw, fh, bvy, bvh, true, cr);
-                    if (cr[2] > 0 && cr[3] > 0 && r[3] > r[1]) {
-                        // the inner edge where the subtitles' mapping puts it; the outer edge a few lines past the
-                        // shown band's edge, so no sliver of picture shows beyond the bar once the band is zoomed
-                        // and filtered (exactly mapped, the bottom bar ended a line short of the screen's bottom);
-                        // across the shown width with the same margin at its sides
-                        constexpr float kOver = 4.0f;
-                        const float bsx = (cr[2] + 2 * kOver) / fw, bbx = cr[0] - kOver, ky = cr[3] / bvh;
-                        auto m = [&](float y) { return cr[1] + ky * (y - bvy); };
-                        const bool top = r[1] <= vt + 1.0f;
-                        const float y0 = top ? cr[1] - kOver : m(r[1]);
-                        const float y1 = top ? m(r[3]) : cr[1] + cr[3] + kOver;
-                        const float bsy = (y1 - y0) / (r[3] - r[1]), bby = y0 - bsy * r[1];
-                        if (std::fabs(bsx - 1) > 1e-4f) c.squeeze[0] = bsx, c.squeeze[1] = bbx / (1 - bsx);
-                        if (std::fabs(bsy - 1) > 1e-4f) c.squeeze[2] = bsy, c.squeeze[3] = bby / (1 - bsy);
-                    }
-                }
-                return wf.bars_out;
+                // xboxrecomp: cutscene_bars on (the default): the bars drawn as the title draws them, at their rows
+                // across the 16:9 width, sliding in and out as on the console. Off: not drawn at all, the same
+                // uncropped picture with nothing over its top and bottom (the subtitles over the picture)
+                return !app::Get().cutscene_bars;
             }
             return false;
         }
@@ -4263,7 +4244,10 @@ bool Squeeze2D(const State& s, const Assembled& a, const DrawShaders& sh, uint32
         else if (on_track && !centred) anchor = fw * 0.5f;
         else if (marker) anchor = (r[0] + r[2]) * 0.5f;
         else if (on_panel) anchor = fw * 0.5f;
-        else if (left) anchor = gx;
+        // the left side's HUD a little in from the edge (issue #17: the health bar sat ~30 px from the left at 1080p
+        // against the buttons' ~120 px from the right; kept near the edge, the extra health bars grow to its right):
+        // 12 of the frame's 640 columns (36 px at 1080p), an anchor 1 / (1 - 0.75) times that
+        else if (left) anchor = gx + fw * (12.0f / 640.0f) * 4.0f;
         else if (right) anchor = fw - gx;
         else anchor = (r[0] + r[2]) * 0.5f;
     }
@@ -5045,7 +5029,11 @@ void D3D12Backend::Present(const Surface& front, bool pillarbox) {
                      live ? "gameplay" : "menu / 4:3", wf_.scene, int(wf_.backdrop), int(wf_.wiped), int(wf_.bars));
             }
         }
-        WideFrame next{.was_live = live, .cut = wf_.bars && !out && !covered, .bars_h_prev = wf_.bars_h,
+        // xboxrecomp: cutscenes are no longer zoomed (cut stays false, WideCrop's cutscene band unused): a cutscene
+        // shows the whole 16:9 frame as gameplay does, framed as the console frames it, with or without the title's
+        // bars (cutscene_bars; Squeeze2D leaves them out when off). Issue #15: the zoom to the band between the bars
+        // cut a quarter of each shot, Hagrid's head off the top
+        WideFrame next{.was_live = live, .cut = false, .bars_h_prev = wf_.bars_h,
                        .bars_out = out, .view_y = wf_.vp_y, .view_h = wf_.vp_h};
         const bool cut = wf_.cut && !covered;
         float gh = float(guest_h_);

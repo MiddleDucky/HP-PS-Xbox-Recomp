@@ -167,11 +167,15 @@ void sub_0016A4A0(void)
     }
     /* field of view (F10 Graphics, % of the game's): the world camera's scales divided by it, the view widened (or
      * narrowed) the same each way; the engine culls with the same scales (read back by 0x16A480 / 0x16A492), so what
-     * comes into view is drawn. The menus' cameras (theirs below, and the 2.4 / 3.2 pairs) keep their framing. This
-     * title has no cutscene test: the slider holds in cutscenes too */
+     * comes into view is drawn. The menus' cameras (theirs below, and the 2.4 / 3.2 pairs) keep their framing, and
+     * so do cutscenes (issue #15: the 80 % default zoomed every shot in 1.25x): the cutscene flag (0x331161, see
+     * hle_debug.c), set by StartCutScene for the cutscene's length. The world camera's update (sub_00180F60 /
+     * sub_00181660) sets the scale every frame from the shot's own, so the game's scale comes back as one starts and
+     * the slider's as it ends */
     int menu_cam = cam && (cam == MEM32(0x34F998) || cam == MEM32(0x34F944));
     int menu_scale = fabsf(xs - 2.4f) < 0.001f || fabsf(xs - 3.2f) < 0.001f;
-    float fov_k = (menu_cam || menu_scale || !(xs > 0.0f)) ? 1.0f : (float)hpps_FovPercent() / 100.0f;
+    int cutscene = MEM8(0x331161u) != 0;
+    float fov_k = (menu_cam || menu_scale || cutscene || !(xs > 0.0f)) ? 1.0f : (float)hpps_FovPercent() / 100.0f;
     if (!d3d_hle() || !hpps_Widescreen() || !(xs > 0.0f) || fabsf(ys / xs - 4.0f / 3.0f) > 0.01f) {
         if (fov_k == 1.0f || !(xs > 0.0f) || !(ys > 0.0f)) {
             sub_0016A4A0_gen();
