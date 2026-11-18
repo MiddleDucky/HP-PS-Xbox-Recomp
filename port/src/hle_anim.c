@@ -31,6 +31,7 @@
 #endif
 #include <windows.h>
 
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -168,43 +169,131 @@ void sub_00036AF0(void)
 
 /*
  * The aiming reticle (issue #22): sub_00012EB0 places the circle round the locked target (the player controller's
- * +0x2564) with a turn of 0x32036C radians and then adds 0.05 to the turn, once per call and with no time step.
- * The player and camera update, sub_00017180, calls it once a frame (from one of two branches), so the circle spun
- * as fast as frames came: unlocked many times too fast, and still turning behind the pause menu. It now turns by
- * 0.05 per 1/59.94 s of real time, the speed it has at 60 fps (3 rad/s), whatever the frame rate. Each call site
- * keeps its own clock, so the two branches never share a frame's time. A long gap (the circle just shown again) is
- * one step, as before.
+ * +0x2564) with a turn of 0x32036C radians and then adds 0.05 to the turn, once per call and with no time step,
+ * unless it leaves early at 0x12F56 (a test against [0x1FABB8]: no turn that call). The run of 2026-11-16 19:30
+ * measured it at 60 fps: 25 calls a second from 0x17492, the 25 Hz tick, so 1.25 rad/s, the console's speed at any
+ * frame rate. The scaling of 1c23cd2 (one turn per 1/59.94 s, from a per-frame reading) made it 3 rad/s, 2.4 times
+ * too fast, and is gone: the game turns it as it always did. Unlocked, a 4 s aim logged no turn at all, so the
+ * speed there is still to be measured: [RETICLE] once a second while aiming counts calls per site, the calls that
+ * turned and those that left early, and the game's rad/s, beside the frame counter [0x3562E8].
  */
 #define RETICLE_TURN 0x0032036Cu
 
 extern void sub_00012EB0_gen(void);
 void sub_00012EB0(void)
 {
-    static LARGE_INTEGER freq;
-    static struct { uint32_t ret; LARGE_INTEGER last; } site[2];
+    static LARGE_INTEGER freq, t0;
+    static uint32_t site_ret[2], ctr0;
+    static unsigned calls[2], turned[2], why[4];  /* left early: a flag, Harry's state, no target, too far */
+    static double rad;
     const uint32_t ret = MEM32(g_esp);
     const float before = MEMF(RETICLE_TURN);
     LARGE_INTEGER now;
-    double dt, k;
     int i;
+
+    /* the function's own early exits, read before it runs (0x12EB0 .. 0x12F47) */
+    const uint32_t ctl = MEM32(MEM32(0x003565B0u) + 0xDC);
+    const uint32_t hstate = ctl ? MEM32(ctl + 0x2564) : 0;
+    const int flag = MEM8(0x0032038Cu) || MEM8(0x0032038Du) || MEM8(0x0032038Fu) || MEM8(0x00320392u) ||
+                     MEM8(0x00356588u) || MEM8(0x003203C8u);
+    const int state = hstate == 0x12 || hstate == 0x2A || hstate == 0x14 || hstate == 0x26;
+    const int no_target = MEM32(0x00320398u) == 0;
 
     sub_00012EB0_gen();
     const float step = MEMF(RETICLE_TURN) - before;
-    if (step == 0.0f) return;  /* no target: nothing turned */
+    if (step == 0.0f) why[flag ? 0 : state ? 1 : no_target ? 2 : 3]++;  /* else past 100 units: the lock let go */
+
+    for (i = 0; i < 2 && site_ret[i] && site_ret[i] != ret; i++) {}
+    if (i == 2) i = 1;
+    site_ret[i] = ret;
+    calls[i]++;
+    if (step != 0.0f) turned[i]++, rad += step;
 
     if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&now);
-    for (i = 0; i < 2 && site[i].ret && site[i].ret != ret; i++) {}
-    if (i == 2) i = 1;
-    dt = site[i].ret == ret && site[i].last.QuadPart
-             ? (double)(now.QuadPart - site[i].last.QuadPart) / (double)freq.QuadPart
-             : 0.0;
-    site[i].ret = ret;
-    site[i].last = now;
-    if (dt <= 0.0 || dt > 0.25) return;  /* first turn after a gap: the game's one step */
-    k = dt * 60000.0 / 1001.0;           /* in 60 fps frames */
-    if (k > 4.0) k = 4.0;
-    MEMF(RETICLE_TURN) = (float)(before + step * k);
+    if (!t0.QuadPart) { t0 = now; ctr0 = MEM32(0x003562E8u); }
+    const double el = (double)(now.QuadPart - t0.QuadPart) / (double)freq.QuadPart;
+    if (el > 3.0) {  /* not aiming for a while: start a fresh second */
+        t0 = now;
+        ctr0 = MEM32(0x003562E8u);
+        calls[0] = calls[1] = turned[0] = turned[1] = why[0] = why[1] = why[2] = why[3] = 0;
+        rad = 0.0;
+        calls[i]++;
+        if (step != 0.0f) turned[i]++, rad += step;
+        else why[flag ? 0 : state ? 1 : no_target ? 2 : 3]++;
+    } else if (el >= 1.0) {
+        static int trace = -1;  /* RECOMP_RETICLE_TRACE=1: the line below once a second while aiming */
+        if (trace < 0) {
+            const char *e = getenv("RECOMP_RETICLE_TRACE");
+            trace = e && *e && *e != '0';
+        }
+        if (trace)
+            fprintf(stderr, "[RETICLE] %.2f s: site %05X x%u (turned %u, left early %u), site %05X x%u (turned %u, "
+                        "left early %u) | early: flag %u, Harry's state %u (now %X), no target %u, past 100 units %u | "
+                        "game %.2f rad/s | frames [0x3562E8] +%u\n", el, site_ret[0], calls[0], turned[0],
+                calls[0] - turned[0], site_ret[1], calls[1], turned[1], calls[1] - turned[1], why[0], why[1], hstate,
+                why[2], why[3], rad / el, MEM32(0x003562E8u) - ctr0);
+        t0 = now;
+        ctr0 = MEM32(0x003562E8u);
+        calls[0] = calls[1] = turned[0] = turned[1] = why[0] = why[1] = why[2] = why[3] = 0;
+        rad = 0.0;
+    }
+}
+
+/*
+ * The Lumos moths round the wand (issue #23): sub_000F70E0 runs once a frame while Lumos is on (+0x17C set) and
+ * moves each moth (+0x150 of them, 0x30 bytes each at +0x154) with no time step:
+ *     v = 0.95 v + 0.05 d;  p += v          (v at +0x00, unit heading d at +0x0C, p at +0x20)
+ * Its target timer (+0x1C) and wing phase (+0x2C) already use the frame time [0x351534]. Unlocked, the moths flew
+ * as fast as frames came. Before the game's step this sets v and p so that the step lands where n steps of 1/59.94 s
+ * would, n being the real time since this object's last call in 60 fps frames: with u = d (= 0.05 d / (1 - 0.95)),
+ *     v' = u + 0.95^n (v - u),   p' = p + n u + (v - u) 0.95 (1 - 0.95^n) / 0.05
+ * which is the game's own step when n = 1. A second call in the same frame gets n = 0 and leaves the moths still.
+ * A long gap (Lumos just cast) is one step, as before.
+ */
+#define MOTH_ON 0x17Cu
+#define MOTH_COUNT 0x150u
+#define MOTH_ARRAY 0x154u
+#define MOTH_SIZE 0x30u
+
+extern void sub_000F70E0_gen(void);
+void sub_000F70E0(void)
+{
+    static LARGE_INTEGER freq;
+    static struct { uint32_t obj; LARGE_INTEGER last; } clk[4];
+    static int next;
+    const uint32_t obj = MEM32(g_esp + 4);
+    const int update = MEM8(g_esp + 0xC) != 0;
+    LARGE_INTEGER now;
+    double dt = -1.0, n, an;
+    uint32_t count, arr, i;
+    int c;
+
+    if (update && obj && MEM32(obj + MOTH_ON) && (count = MEM32(obj + MOTH_COUNT)) != 0 &&
+        (arr = MEM32(obj + MOTH_ARRAY)) != 0) {
+        if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+        QueryPerformanceCounter(&now);
+        for (c = 0; c < 4 && clk[c].obj != obj; c++) {}
+        if (c == 4) { c = next; next = (next + 1) & 3; clk[c].last.QuadPart = 0; }
+        else dt = (double)(now.QuadPart - clk[c].last.QuadPart) / (double)freq.QuadPart;
+        clk[c].obj = obj;
+        clk[c].last = now;
+        if (dt >= 0.0 && dt <= 0.25 && count <= 256) {
+            n = dt * 60000.0 / 1001.0;  /* in 60 fps frames */
+            an = pow(0.95, n);
+            for (i = 0; i < count; i++) {
+                const uint32_t r = arr + i * MOTH_SIZE;
+                for (int ax = 0; ax < 3; ax++) {
+                    const double v = MEMF(r + 4 * ax), u = MEMF(r + 0x0C + 4 * ax), p = MEMF(r + 0x20 + 4 * ax);
+                    const double v1 = u + an * (v - u);
+                    const double p1 = p + n * u + (v - u) * 0.95 * (1.0 - an) / 0.05;
+                    MEMF(r + 4 * ax) = (float)((v1 - 0.05 * u) / 0.95);  /* the game's step makes this v1 */
+                    MEMF(r + 0x20 + 4 * ax) = (float)(p1 - v1);           /* and adds v1 to it */
+                }
+            }
+        }
+    }
+    sub_000F70E0_gen();
 }
 
 extern void sub_000BA050_gen(void);
@@ -214,4 +303,88 @@ void sub_000BA050(void)
         fprintf(stderr, "[QUAKE] %8.2f s from %08X for %g strength %g level %u flag %u\n", GetTickCount64() / 1000.0,
                 MEM32(g_esp), ARGF(0), ARGF(1), MEM32(0x356CC4), MEM8(0x33ED38));
     sub_000BA050_gen();
+}
+
+/*
+ * The aiming circle's spin (issue #22), measured where it is drawn: the renderer (d3d12.cpp Squeeze2D) knows it as a
+ * single turned quad and passes its turn (the first corner's angle round the middle) on every such draw, on the game's
+ * thread. [CIRCLE] once a second while it is drawn: draws, the turn per draw and per second, and who drew it (the
+ * return addresses up the guest's frame chain, then code addresses found on the stack), to find the step to retime.
+ */
+void hpps_CircleDraw(float angle)
+{
+    static ULONGLONG since;
+    static unsigned draws;
+    static float last, turned, most;
+    static int have;
+    static char who[256];
+    ULONGLONG now = GetTickCount64();
+    if (have) {
+        float d = angle - last;
+        while (d > 3.14159265f) d -= 6.28318531f;
+        while (d < -3.14159265f) d += 6.28318531f;
+        turned += d;
+        if (fabsf(d) > fabsf(most)) most = d;
+    }
+    last = angle, have = 1;
+    if (!draws) {
+        int n = 0;
+        uint32_t ebp = g_ebp;
+        n += snprintf(who + n, sizeof who - n, "frames");
+        for (int k = 0; k < 6 && ebp >= 0x00010000u && ebp < 0x04000000u && n < 120; k++, ebp = MEM32(ebp))
+            n += snprintf(who + n, sizeof who - n, " %08X", MEM32(ebp + 4));
+        n += snprintf(who + n, sizeof who - n, " | stack");
+        for (uint32_t p = g_esp, k = 0; k < 64 && n < 240; k++, p += 4) {
+            uint32_t v = MEM32(p);
+            if (v >= 0x00011000u && v < 0x001C0000u) n += snprintf(who + n, sizeof who - n, " %08X", v);
+        }
+    }
+    draws++;
+    if (!since) since = now;
+    if (now - since >= 1000) {
+        float s = (now - since) / 1000.0f;
+        fprintf(stderr, "[CIRCLE] %u draws in %.2f s: turned %.0f deg/s, %.1f deg a draw (most %.1f) | %s\n", draws, s,
+                turned * 57.29578f / s, draws > 1 ? turned * 57.29578f / (draws - 1) : 0.0f, most * 57.29578f, who);
+        since = now, draws = 0, turned = 0, most = 0;
+    }
+}
+
+/*
+ * The aiming circle's spin (issue #22). The circle is one turned quad drawn by sub_001535E0 (called through a pointer
+ * once a frame while a target is locked; found by [CIRCLE] and the F7 dumps of 2026-11-16, it alone calls the four
+ * functions that only ran while aiming). Each draw it turns [0x21BF5C] (degrees, wrapped at 360) by
+ * ticks a second [0x21B7B8] x the tick's length [0x21B7BC] x 10 [0x1FAC6C]: 25 x 0.04 x 10 = 10 degrees, a step
+ * a step per draw: 600 degrees a second at 60 fps and 1440 unlocked (measured). The console drew it at NTSC's
+ * 59.94 frames a second (the user's choice, 2026-11-17, as the Lumos moths: 250 a second, a step per 25 Hz tick,
+ * looked too slow), so the step here is the game's scaled to the time since the last draw in NTSC frames: 599
+ * degrees a second at any frame rate. The angle is set so the game's own add lands on it (and put back if the call
+ * left before turning it). A fix of the game's own frame-rate mistake: always on.
+ */
+extern void sub_001535E0_gen(void);
+
+#define CIRCLE_ANGLE   0x0021BF5Cu
+#define CIRCLE_TICKS   0x0021B7B8u
+#define CIRCLE_TICKLEN 0x0021B7BCu
+#define CIRCLE_K       0x001FAC6Cu
+
+void sub_001535E0(void)
+{
+    static LARGE_INTEGER freq, last;
+    LARGE_INTEGER now;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    double dt = last.QuadPart ? (double)(now.QuadPart - last.QuadPart) / (double)freq.QuadPart : 0.0;
+    last = now;
+    const float tick = MEMF(CIRCLE_TICKLEN);
+    const float game_step = (float)MEM32(CIRCLE_TICKS) * tick * MEMF(CIRCLE_K);
+    if (!(tick > 0.0f) || !(game_step > 0.0f) || game_step > 90.0f) {
+        sub_001535E0_gen();
+        return;
+    }
+    if (dt > 0.25) dt = 1.0 / 59.94;  /* the first draw of a lock-on, or after a pause: one console frame's worth */
+    const float before = MEMF(CIRCLE_ANGLE);
+    const float pre = before + game_step * (float)(dt * 59.94) - game_step;
+    MEMF(CIRCLE_ANGLE) = pre;
+    sub_001535E0_gen();
+    if (MEMF(CIRCLE_ANGLE) == pre) MEMF(CIRCLE_ANGLE) = before;
 }
