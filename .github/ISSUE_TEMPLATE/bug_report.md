@@ -20,8 +20,9 @@ Steps to reproduce the behavior:
 **Expected behavior**
 A clear and concise description of what you expected to happen.
 
-**Screenshots/Videos**
+**Screenshots/Videos/Logs**
 If applicable, add videos/screenshots to help explain your problem.
+Logs and/or saves are needed to identify the cause.
 
 **Desktop (please complete the following information):**
  - OS: [e.g. iOS]
